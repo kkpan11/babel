@@ -62,7 +62,7 @@ export default function transpileEnum(
           )[0],
         );
       }
-      ENUMS.set(path.scope.getBindingIdentifier(name), data);
+      ENUMS.set(path.scope.getBindingIdentifier(name)!, data);
       break;
     }
 
@@ -101,10 +101,9 @@ const buildEnumMember = (isString: boolean, options: Record<string, unknown>) =>
  */
 function enumFill(path: NodePath<t.TSEnumDeclaration>, t: t, id: t.Identifier) {
   const { enumValues, data, isPure } = translateEnumValues(path, t);
-  const enumMembers: NodePath<t.TSEnumMember>[] = process.env.BABEL_8_BREAKING
-    ? // @ts-ignore(Babel 7 vs Babel 8) Babel 8 AST
-      path.get("body").get("members")
-    : path.get("members");
+  const enumMembers: NodePath<t.TSEnumMember>[] = path
+    .get("body")
+    .get("members");
   const assignments = [];
   for (let i = 0; i < enumMembers.length; i++) {
     const [memberName, memberValue] = enumValues[i];
@@ -131,7 +130,6 @@ function enumFill(path: NodePath<t.TSEnumDeclaration>, t: t, id: t.Identifier) {
 }
 
 export function isSyntacticallyString(expr: t.Expression): boolean {
-  // @ts-ignore(Babel 7 vs Babel 8) Type 'Expression | Super' is not assignable to type 'Expression' in Babel 8
   expr = skipTransparentExprWrapperNodes(expr);
   switch (expr.type) {
     case "BinaryExpression": {
@@ -159,7 +157,7 @@ export function isSyntacticallyString(expr: t.Expression): boolean {
  *     Z = X | Y,
  *   }
  */
-type PreviousEnumMembers = Map<string, number | string>;
+type PreviousEnumMembers = Map<string, number | string | undefined>;
 
 type EnumSelfReferenceVisitorState = {
   seen: PreviousEnumMembers;
@@ -168,7 +166,7 @@ type EnumSelfReferenceVisitorState = {
 };
 
 function ReferencedIdentifier(
-  expr: NodePath<t.Identifier>,
+  expr: NodePath<t.Identifier | t.JSXIdentifier>,
   state: EnumSelfReferenceVisitorState,
 ) {
   const { seen, path, t } = state;
@@ -183,24 +181,16 @@ function ReferencedIdentifier(
           return A;
         })())
       } */
-    if (process.env.BABEL_8_BREAKING) {
-      if (expr.scope.hasBinding(name, { upToScope: path.scope })) {
-        return;
-      }
-    } else {
-      for (
-        let curScope = expr.scope;
-        curScope !== path.scope;
-        curScope = curScope.parent
-      ) {
-        if (curScope.hasOwnBinding(name)) {
-          return;
-        }
-      }
+
+    if (expr.scope.hasBinding(name, { upToScope: path.scope })) {
+      return;
     }
 
     expr.replaceWith(
-      t.memberExpression(t.cloneNode(path.node.id), t.cloneNode(expr.node)),
+      t.memberExpression(
+        t.cloneNode(path.node.id),
+        t.cloneNode(expr.node as t.Identifier),
+      ),
     );
     expr.skip();
   }
@@ -211,7 +201,7 @@ const enumSelfReferenceVisitor = {
 };
 
 export function translateEnumValues(path: NodePath<t.TSEnumDeclaration>, t: t) {
-  const bindingIdentifier = path.scope.getBindingIdentifier(path.node.id.name);
+  const bindingIdentifier = path.scope.getBindingIdentifier(path.node.id.name)!;
   const seen: PreviousEnumMembers = ENUMS.get(bindingIdentifier) ?? new Map();
 
   // Start at -1 so the first enum member is its increment, 0.
@@ -219,16 +209,16 @@ export function translateEnumValues(path: NodePath<t.TSEnumDeclaration>, t: t) {
   let lastName: string;
   let isPure = true;
 
-  const enumMembers: NodePath<t.TSEnumMember>[] = process.env.BABEL_8_BREAKING
-    ? // @ts-ignore(Babel 7 vs Babel 8) Babel 8 AST
-      path.get("body").get("members")
-    : path.get("members");
-
-  const enumValues: Array<[name: string, value: t.Expression]> =
-    enumMembers.map(memberPath => {
+  const enumMembers: NodePath<t.TSEnumMember>[] = path
+    .get("body")
+    .get("members");
+  const enumValues: [name: string, value: t.Expression][] = enumMembers.map(
+    memberPath => {
       const member = memberPath.node;
       const name = t.isIdentifier(member.id) ? member.id.name : member.id.value;
-      const initializerPath = memberPath.get("initializer");
+      const initializerPath = memberPath.get(
+        "initializer",
+      ) as NodePath<t.Expression>;
       const initializer = member.initializer;
       let value: t.Expression;
       if (initializer) {
@@ -289,7 +279,8 @@ export function translateEnumValues(path: NodePath<t.TSEnumDeclaration>, t: t) {
 
       lastName = name;
       return [name, value];
-    });
+    },
+  );
 
   return {
     isPure,
@@ -302,7 +293,7 @@ export function translateEnumValues(path: NodePath<t.TSEnumDeclaration>, t: t) {
 function computeConstantValue(
   path: NodePath,
   prevMembers?: PreviousEnumMembers,
-  seen: Set<t.Identifier> = new Set(),
+  seen = new Set<t.Identifier>(),
 ): number | string | undefined {
   return evaluate(path);
 
@@ -320,12 +311,14 @@ function computeConstantValue(
       case "NumericLiteral":
         return expr.value;
       case "ParenthesizedExpression":
-        return evaluate(path.get("expression"));
+        return evaluate(
+          (path as NodePath<t.ParenthesizedExpression>).get("expression"),
+        );
       case "Identifier":
         return evaluateRef(path, prevMembers, seen);
       case "TemplateLiteral": {
         if (expr.quasis.length === 1) {
-          return expr.quasis[0].value.cooked;
+          return expr.quasis[0].value.cooked ?? undefined;
         }
 
         const paths = (path as NodePath<t.TemplateLiteral>).get("expressions");
@@ -350,7 +343,7 @@ function computeConstantValue(
 
   function evaluateRef(
     path: NodePath,
-    prevMembers: PreviousEnumMembers,
+    prevMembers: PreviousEnumMembers | undefined,
     seen: Set<t.Identifier>,
   ): number | string | undefined {
     if (path.isMemberExpression()) {
@@ -365,7 +358,7 @@ function computeConstantValue(
         return;
       }
       const bindingIdentifier = path.scope.getBindingIdentifier(obj.name);
-      const data = ENUMS.get(bindingIdentifier);
+      const data = ENUMS.get(bindingIdentifier!);
       if (!data) return;
       // @ts-expect-error checked above
       return data.get(prop.computed ? prop.value : prop.name);

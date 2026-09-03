@@ -1,9 +1,7 @@
 import { parse } from "@babel/parser";
 import * as t from "@babel/types";
-import { IS_BABEL_8 } from "$repo-utils";
 
-import _traverse, { NodePath } from "../lib/index.js";
-const traverse = _traverse.default || _traverse;
+import traverse, { NodePath } from "../lib/index.js";
 
 function getPath(code, options) {
   const ast =
@@ -291,6 +289,31 @@ describe("scope", () => {
       ).toBe("outside");
     });
 
+    it.each([
+      `switch (a) { default: let a = "inside" }`,
+      `class foo { @a m() { var a = "inside"; } }`,
+      `class foo { [a]() { var a = "inside" } }`,
+    ])("scope hasGlobal with crawl: `%s`", function (code) {
+      let hasGlobal;
+      traverse(
+        parse(code, {
+          plugins: [["decorators", { version: "2025-03" }]],
+        }),
+        {
+          Identifier(path) {
+            if (
+              path.node.name === "a" &&
+              path.parent.type !== "VariableDeclarator" &&
+              path.parent.type !== "AssignmentPattern"
+            ) {
+              hasGlobal = path.scope.hasGlobal("a");
+            }
+          },
+        },
+      );
+      expect(hasGlobal).toBe(true);
+    });
+
     it("variable declaration", function () {
       expect(getPath("var foo = null;").scope.getBinding("foo").path.type).toBe(
         "VariableDeclarator",
@@ -502,7 +525,7 @@ describe("scope", () => {
     describe("reference paths", () => {
       it("param referenced in function body", function () {
         const path = getIdentifierPath("function square(n) { return n * n}");
-        const referencePaths = path.context.scope.bindings.n.referencePaths;
+        const referencePaths = path.scope.bindings.n.referencePaths;
         expect(referencePaths).toHaveLength(2);
         expect(referencePaths[0].node.loc.start).toEqual({
           line: 1,
@@ -672,6 +695,13 @@ describe("scope", () => {
         sourceType: "module",
       });
       expect(path.scope.hasGlobal("x")).toBe(false);
+    });
+
+    it("export should be counted as reference", () => {
+      const path = getPath("export const two = 2; two;", {
+        sourceType: "module",
+      });
+      expect(path.scope.getBinding("two").references).toBe(2);
     });
   });
 
@@ -1039,6 +1069,85 @@ describe("scope", () => {
       `);
       expect(program.scope.hasOwnBinding("ref")).toBe(true);
     });
+    it("registers the new binding within IIFunctionExpression when it has no arguments", () => {
+      const program = getPath("(function(a, b) {})()");
+      const functionBody = program.get("body.0.expression.callee.body");
+      functionBody.scope.push({ id: t.identifier("ref") });
+      expect(program.toString()).toMatchInlineSnapshot(
+        `"(function (a, b, ref) {})();"`,
+      );
+      expect(functionBody.scope.hasOwnBinding("ref")).toBe(true);
+      expect(program.scope.hasOwnBinding("ref")).toBe(false);
+    });
+    it("registers the new binding within IIFunctionExpression when it has same arguments with parameters", () => {
+      const program = getPath("(function(a, b) {})(0, 0)");
+      const functionBody = program.get("body.0.expression.callee.body");
+      functionBody.scope.push({ id: t.identifier("ref") });
+      expect(program.toString()).toMatchInlineSnapshot(
+        `"(function (a, b, ref) {})(0, 0);"`,
+      );
+      expect(functionBody.scope.hasOwnBinding("ref")).toBe(true);
+      expect(program.scope.hasOwnBinding("ref")).toBe(false);
+    });
+    it("registers the new binding within IIArrowFunctionExpression when it has no arguments", () => {
+      const program = getPath("((a, b) => {})()");
+      const functionBody = program.get("body.0.expression.callee.body");
+      functionBody.scope.push({ id: t.identifier("ref") });
+      expect(program.toString()).toMatchInlineSnapshot(
+        `"((a, b, ref) => {})();"`,
+      );
+      expect(functionBody.scope.hasOwnBinding("ref")).toBe(true);
+      expect(program.scope.hasOwnBinding("ref")).toBe(false);
+    });
+    it("registers the new binding within IIArrowFunctionExpression when it has same arguments with parameters", () => {
+      const program = getPath("((a, b) => {})(0, 0)");
+      const functionBody = program.get("body.0.expression.callee.body");
+      functionBody.scope.push({ id: t.identifier("ref") });
+      expect(program.toString()).toMatchInlineSnapshot(
+        `"((a, b, ref) => {})(0, 0);"`,
+      );
+      expect(functionBody.scope.hasOwnBinding("ref")).toBe(true);
+      expect(program.scope.hasOwnBinding("ref")).toBe(false);
+    });
+
+    it("should not register the new binding within IIFunctionExpression when it has a function name", () => {
+      const program = getPath("(function f(a, b = f.length) {})()");
+      const functionBody = program.get("body.0.expression.callee.body");
+      functionBody.scope.push({ id: t.identifier("ref") });
+      expect(program.toString()).toMatchInlineSnapshot(`
+        "(function f(a, b = f.length) {
+          var ref;
+        })();"
+      `);
+      expect(functionBody.scope.hasOwnBinding("ref")).toBe(true);
+      expect(program.scope.hasOwnBinding("ref")).toBe(false);
+    });
+    it("should not register the new binding within IIFunctionExpression when it has more arguments than parameters", () => {
+      const program = getPath("(function() { arguments.length })(0)");
+      const functionBody = program.get("body.0.expression.callee.body");
+      functionBody.scope.push({ id: t.identifier("ref") });
+      expect(program.toString()).toMatchInlineSnapshot(`
+        "(function () {
+          var ref;
+          arguments.length;
+        })(0);"
+      `);
+      expect(functionBody.scope.hasOwnBinding("ref")).toBe(true);
+      expect(program.scope.hasOwnBinding("ref")).toBe(false);
+    });
+    it("should not register the new binding within IIArrowFunctionExpression when it has more arguments than parameters", () => {
+      const program = getPath("(() => { arguments.length })(0)");
+      const functionBody = program.get("body.0.expression.callee.body");
+      functionBody.scope.push({ id: t.identifier("ref") });
+      expect(program.toString()).toMatchInlineSnapshot(`
+        "(() => {
+          var ref;
+          arguments.length;
+        })(0);"
+      `);
+      expect(functionBody.scope.hasOwnBinding("ref")).toBe(true);
+      expect(program.scope.hasOwnBinding("ref")).toBe(false);
+    });
   });
 
   describe("rename", () => {
@@ -1071,12 +1180,6 @@ describe("scope", () => {
       const renamedPropertyMatcher = expect.objectContaining({
         type: "ObjectProperty",
         shorthand: false,
-        ...(IS_BABEL_8()
-          ? {}
-          : {
-              // eslint-disable-next-line jest/no-conditional-expect
-              extra: expect.objectContaining({ shorthand: false }),
-            }),
         key: expect.objectContaining({ name: "a" }),
         value: expect.objectContaining({
           name: expect.not.stringMatching(/^a$/),
@@ -1121,12 +1224,6 @@ describe("scope", () => {
       const originalPropertyMatcher = expect.objectContaining({
         type: "ObjectProperty",
         shorthand: true,
-        ...(IS_BABEL_8()
-          ? {}
-          : {
-              // eslint-disable-next-line jest/no-conditional-expect
-              extra: expect.objectContaining({ shorthand: true }),
-            }),
         key: expect.objectContaining({ name: "b" }),
         value: expect.objectContaining({ name: "b" }),
       });
@@ -1280,6 +1377,149 @@ describe("scope", () => {
       expect(
         scope.hasBinding("Symbol", { upToScope: scope, noGlobals: true }),
       ).toBe(false);
+    });
+
+    describe("global builtins", () => {
+      let scope;
+      beforeAll(() => ({ scope } = getPath(``)));
+      it.each([
+        ["es3", "Array"],
+        ["es5", "JSON"],
+        ["es2015", "Reflect"],
+        ["es2017", "Atomics"],
+        ["es2020", "BigInt"],
+        ["es2021", "AggregateError"],
+        ["es2025", "Iterator"],
+        // To add new global builtins, see https://github.com/sindresorhus/globals/tree/main/data
+      ])(`supports %s: scope.hasBinding(%s) should be true`, (_, name) => {
+        expect(scope.hasBinding(name)).toBe(true);
+      });
+    });
+  });
+
+  describe("generateUidBasedOnNode", () => {
+    let scope;
+    beforeEach(() => {
+      scope = getPath("var a").scope;
+    });
+    it("returns _ref for undefined input", () => {
+      expect(scope.generateUidBasedOnNode(undefined)).toBe("_ref");
+    });
+    it("returns _ref for null input", () => {
+      expect(scope.generateUidBasedOnNode(null)).toBe("_ref");
+    });
+    it("returns _ref for empty object", () => {
+      expect(scope.generateUidBasedOnNode({})).toBe("_ref");
+    });
+    it("auto increments _ref for multiple calls", () => {
+      expect(scope.generateUidBasedOnNode(null)).toBe("_ref");
+      expect(scope.generateUidBasedOnNode(null)).toBe("_ref2");
+      expect(scope.generateUidBasedOnNode(null)).toBe("_ref3");
+    });
+    // Expressions
+    it.each([
+      ["a.b", "_a$b"],
+      ["a[0]", "_a$"],
+      ["a[0].b", "_a$0$b"],
+      ["a[0][1]", "_a$0$"],
+      ["a[0][1].b", "_a$0$1$b"],
+      ["a[0].b.c", "_a$0$b$c"],
+      ["a.b.c", "_a$b$c"],
+      ["a?.[0]", "_a$"],
+      ["a?.[0].b", "_a$0$b"],
+      ["a?.b.c", "_a$b$c"],
+      ["a?.b?.c", "_a$b$c"],
+      ["a?.b?.c?.d", "_a$b$c$d"],
+      ["a().b", "_a$b"],
+      ["a(0).b", "_a$b"],
+      ["a(0, 1)?.b", "_a$b"],
+      ["a[0n]", "_a$"],
+      ["a[0n].b", "_a$0$b"],
+
+      ["a.b = 1", "_a$b"],
+      ["([a.b] = 1)", "_ref"],
+      ["({ a: b } = {})", "_a"],
+      ["({ a: b, c: d } = {})", "_a$c"],
+      ["({ a: b, c: d, ...e } = {})", "_a$c$e"],
+
+      ["({ a: b })", "_a"],
+      ["({ a: b, c: d })", "_a$c"],
+      ["({ a: b, c: d, ...e })", "_a$c$e"],
+      ["({ a() {}, [0]: 1, [b]() {},  })", "_a$0$b"],
+
+      ["(a.b = 1)", "_a$b"],
+      ["(a[0] = 1)", "_a$"],
+      ["(a[0].b = 1)", "_a$0$b"],
+      ["(a[0][1] = 1)", "_a$0$"],
+      ["(a[0][1].b = 1)", "_a$0$1$b"],
+      ["(a[0].b.c = 1)", "_a$0$b$c"],
+      ["(a.b.c = 1)", "_a$b$c"],
+
+      ["await a.b", "_await$a$b"],
+      ["(function f() { return a.b; })", "_f"],
+      ["(class C { m() { return a.b; } })", "_C"],
+
+      ["this.a.b", "_this$a$b"],
+      ["import.meta", "_import$meta"],
+
+      ["void a.b", "_a$b"],
+      ["a.b++", "_a$b"],
+      ["a.b ??= 1", "_a$b"],
+      ["a.b ||= 1", "_a$b"],
+      ["a.b &&= 1", "_a$b"],
+
+      ["<div>{a.b}</div>", "_div"],
+      ["<a.b>foo</a.b>", "_a$b"],
+      ["<a.b />", "_a$b"],
+      ["<>{a.b}</>", "_Fragment"],
+
+      ["_", "_ref"],
+      ["() => { return a.b; }", "_ref"],
+
+      ["(do {})", "_do"],
+      ["import('foo', { with: { type: 'json' } })", "_import"],
+      // cut off at 20 characters
+      ["aLongIdentifierThatIsMoreThan20Characters", "_aLongIdentifierThatI"],
+    ])("should generate uid based on the input `%s`", (input, expected) => {
+      const ast = getPath(input, {
+        sourceType: "module",
+        plugins: ["doExpressions", "jsx"],
+      }).get("body.0.expression").node;
+      expect(ast).toBeTruthy();
+      expect(scope.generateUidBasedOnNode(ast)).toBe(expected);
+    });
+    // Statements
+    it.each([
+      [";", "_ref"],
+      ["import 'foo';", "_foo"],
+      ["import { foo } from 'bar';", "_bar"],
+      ["import { foo as bar } from 'baz';", "_baz"],
+      ["import * as foo from 'bar';", "_bar"],
+      ["export { foo } from 'bar';", "_bar"],
+      ["export * from 'bar';", "_bar"],
+      ["export { foo as bar } from 'baz';", "_baz"],
+      ["import foo from 'bar';", "_bar"],
+
+      ["export default foo;", "_foo"],
+      ["export { foo, bar };var foo, bar;", "_foo$bar"],
+      ["export { foo as bar, baz as qux };var foo, baz;", "_foo$baz"],
+
+      ["function f() { return a.b; }", "_f"],
+      ["class C { m() { return a.b; } }", "_C"],
+
+      ["var a = 1;", "_ref"],
+    ])("should generate uid based on the input `%s`", (input, expected) => {
+      const ast = getPath(input, {
+        sourceType: "module",
+        plugins: ["doExpressions"],
+      }).get("body.0").node;
+      expect(ast).toBeTruthy();
+      expect(scope.generateUidBasedOnNode(ast)).toBe(expected);
+    });
+    it("should support default name", () => {
+      const ast = getPath(";", { sourceType: "module" }).get("body.0").node;
+      expect(ast).toBeTruthy();
+      expect(scope.generateUidBasedOnNode(ast, "default")).toBe("_default");
     });
   });
 });

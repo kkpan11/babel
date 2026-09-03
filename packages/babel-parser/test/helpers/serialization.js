@@ -20,6 +20,10 @@ const toBigInt = global.BigInt || (() => null);
 
 const SerializationKey = "$$ babel internal serialized type";
 
+// RegExp: RegExpLiteral#value
+// BigInt: BigIntLiteral#value, BigIntLiteral#extra.rawValue
+const customSerializationASTKeys = new Set(["value", "rawValue"]);
+
 export const deserialize = (filename, options, string) =>
   withErrors(
     options.throws,
@@ -28,7 +32,7 @@ export const deserialize = (filename, options, string) =>
         string,
         isExtended(filename) &&
           ((key, value) =>
-            key !== "value" ||
+            !customSerializationASTKeys.has(key) ||
             !value ||
             typeof value !== "object" ||
             !value[SerializationKey]
@@ -81,7 +85,8 @@ const CompactRegExp = new RegExp(
 export function serialize(value) {
   let extended = false;
   const toExtended = (name, data) => (
-    (extended = true), { [SerializationKey]: name, ...data }
+    (extended = true),
+    { [SerializationKey]: name, ...data }
   );
   const encode = (key, value) =>
     typeof value === "bigint"

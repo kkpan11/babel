@@ -10,7 +10,6 @@ var recast = require("recast");
 var v8 = require("v8");
 var types = recast.types;
 var n = types.namedTypes;
-var expect = require("expect");
 
 function transform(ast) {
   return require("@babel/core")
@@ -168,7 +167,7 @@ describe("uglifyjs dead code removal", function () {
   });
 });
 
-context("functions", function () {
+describe("functions", function () {
   function marksCorrectly(marked, varName) {
     // marked should be a VariableDeclarator
     n.VariableDeclarator.assert(marked);

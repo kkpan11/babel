@@ -12,6 +12,7 @@ import {
   BUILDER_KEYS,
   DEPRECATED_KEYS,
   NODE_PARENT_VALIDATIONS,
+  NODE_UNION_SHAPES__PRIVATE,
   allExpandedTypes,
 } from "./utils.ts";
 import {
@@ -39,11 +40,16 @@ for (const { types, set } of allExpandedTypes) {
   }
 }
 
-const TYPES: Array<string> = [].concat(
+const TYPES: string[] = ([] as string[]).concat(
   Object.keys(VISITOR_KEYS),
   Object.keys(FLIPPED_ALIAS_KEYS),
   Object.keys(DEPRECATED_KEYS),
 );
+
+/**
+ * @internal
+ */
+export { NODE_UNION_SHAPES__PRIVATE };
 
 export {
   VISITOR_KEYS,
