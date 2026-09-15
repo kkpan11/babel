@@ -1,6 +1,6 @@
 /* c8 ignore start */
 
-import type { ValidatedOptions } from "./validation/options.ts";
+import type { InputOptions } from "./validation/options.ts";
 import getTargets, {
   type InputTargets,
 } from "@babel/helper-compilation-targets";
@@ -17,7 +17,7 @@ export function resolveBrowserslistConfigFile(
 }
 
 export function resolveTargets(
-  options: ValidatedOptions,
+  options: InputOptions,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   root: string,
 ): Targets {
@@ -27,15 +27,11 @@ export function resolveTargets(
   if (typeof optTargets === "string" || Array.isArray(optTargets)) {
     targets = { browsers: optTargets };
   } else if (optTargets) {
-    if ("esmodules" in optTargets) {
-      targets = { ...optTargets, esmodules: "intersect" };
-    } else {
-      // https://github.com/microsoft/TypeScript/issues/17002
-      targets = optTargets as InputTargets;
-    }
+    // https://github.com/microsoft/TypeScript/issues/17002
+    targets = optTargets as InputTargets;
   }
 
-  return getTargets(targets, {
+  return getTargets(targets!, {
     ignoreBrowserslistConfig: true,
     browserslistEnv: options.browserslistEnv,
   });

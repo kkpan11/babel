@@ -24,7 +24,7 @@ export default valueToNode as {
   (value: number): t.NumericLiteral | t.BinaryExpression | t.UnaryExpression;
   (value: bigint): t.BigIntLiteral;
   (value: RegExp): t.RegExpLiteral;
-  (value: ReadonlyArray<unknown>): t.ArrayExpression;
+  (value: readonly unknown[]): t.ArrayExpression;
 
   // this throws with objects that are not plain objects,
   // or if there are non-valueToNode-able values
@@ -105,13 +105,17 @@ function valueToNode(value: unknown): t.Expression {
 
   // bigints
   if (typeof value === "bigint") {
-    return bigIntLiteral(value.toString());
+    if (value < 0) {
+      return unaryExpression("-", bigIntLiteral(-value));
+    } else {
+      return bigIntLiteral(value);
+    }
   }
 
   // regexes
   if (isRegExp(value)) {
     const pattern = value.source;
-    const flags = /\/([a-z]*)$/.exec(value.toString())[1];
+    const flags = /\/([a-z]*)$/.exec(value.toString())![1];
     return regExpLiteral(pattern, flags);
   }
 

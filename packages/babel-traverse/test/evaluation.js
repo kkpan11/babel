@@ -1,7 +1,6 @@
 import { parse } from "@babel/parser";
 
-import _traverse from "../lib/index.js";
-const traverse = _traverse.default || _traverse;
+import traverse from "../lib/index.js";
 
 function getPath(code) {
   const ast = parse(code);
@@ -202,17 +201,13 @@ describe("evaluation", function () {
         .evaluate().value,
     ).toBe("?x=1");
 
-    if (process.env.BABEL_8_BREAKING) {
-      // eslint-disable-next-line jest/no-conditional-expect
-      expect(
-        getPath("btoa('babel');").get("body.0.expression").evaluate().value,
-      ).toBe("YmFiZWw=");
+    expect(
+      getPath("btoa('babel');").get("body.0.expression").evaluate().value,
+    ).toBe("YmFiZWw=");
 
-      // eslint-disable-next-line jest/no-conditional-expect
-      expect(
-        getPath("atob('YmFiZWw=');").get("body.0.expression").evaluate().value,
-      ).toBe("babel");
-    }
+    expect(
+      getPath("atob('YmFiZWw=');").get("body.0.expression").evaluate().value,
+    ).toBe("babel");
   });
 
   it("should not deopt vars in different scope", function () {
@@ -443,6 +438,34 @@ describe("evaluation", function () {
     `);
     const evalResult = path.get("body.2.expression").evaluate();
     expect(evalResult.confident).toBe(true);
+  });
+
+  it("should not evaluate arrays with new references", function () {
+    const path = getPath(`
+      let value = [];
+      value.push(Math.random());
+      let value2 = value;
+      value2;
+    `);
+    const evalResult = path.get("body.3.expression").evaluate();
+    expect(evalResult.confident).toBe(false);
+  });
+
+  it("should not evaluate Math.method when Math is shadowed by local variable", function () {
+    const path = getPath(`
+      function test(Math) {
+        Math.min(1, 2);
+      }
+    `);
+    const evalResult = path.get("body.0.body.body.0.expression").evaluate();
+    expect(evalResult.confident).toBe(false);
+  });
+
+  it("should evaluate standard global objects when not shadowed", function () {
+    const path = getPath("Math.min(1, 2);");
+    const evalResult = path.get("body.0.expression").evaluate();
+    expect(evalResult.confident).toBe(true);
+    expect(evalResult.value).toBe(1);
   });
 
   addDeoptTest("({a:{b}})", "ObjectExpression", "Identifier");
