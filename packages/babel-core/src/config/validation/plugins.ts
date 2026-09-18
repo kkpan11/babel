@@ -13,8 +13,10 @@ import type {
 } from "./option-assertions.ts";
 import type { parse, ParserOptions } from "@babel/parser";
 import type { Visitor } from "@babel/traverse";
-import type { ValidatedOptions } from "./options.ts";
+import type { ResolvedOptions } from "./options.ts";
 import type { File, PluginAPI, PluginPass } from "../../index.ts";
+import type { GeneratorOptions, GeneratorResult } from "@babel/generator";
+import type babelGenerator from "@babel/generator";
 
 // Note: The casts here are just meant to be static assertions to make sure
 // that the assertion functions actually assert that the value's type matches
@@ -82,26 +84,29 @@ type VisitorHandler =
 export type PluginObject<S extends PluginPass = PluginPass> = {
   name?: string;
   manipulateOptions?: (
-    options: ValidatedOptions,
-    parserOpts: ParserOptions,
+    options: ResolvedOptions & { generatorOpts: GeneratorOptions },
+    parserOpts: ParserOptions & {
+      plugins: NonNullable<ParserOptions["plugins"]>;
+    },
   ) => void;
   pre?: (this: S, file: File) => void | Promise<void>;
   post?: (this: S, file: File) => void | Promise<void>;
-  inherits?: (
-    api: PluginAPI,
-    options: unknown,
-    dirname: string,
-  ) => PluginObject;
+  inherits?: (api: PluginAPI, options: any, dirname: string) => PluginObject;
   visitor?: Visitor<S>;
   parserOverride?: (
     ...args: [...Parameters<typeof parse>, typeof parse]
   ) => ReturnType<typeof parse>;
-  generatorOverride?: Function;
+  generatorOverride?: (
+    ast: File["ast"],
+    generatorOpts: GeneratorOptions,
+    code: File["code"],
+    generate: typeof babelGenerator,
+  ) => GeneratorResult;
 };
 
-export function validatePluginObject(obj: {
-  [key: string]: unknown;
-}): PluginObject {
+export function validatePluginObject(
+  obj: Record<string, unknown>,
+): PluginObject {
   const rootPath: RootPath = {
     type: "root",
     source: "plugin",
@@ -126,5 +131,5 @@ export function validatePluginObject(obj: {
     }
   });
 
-  return obj as any;
+  return obj;
 }
