@@ -56,6 +56,7 @@ type Context = {
 export default function /* @no-mangle */ _regenerator() {
   /*! regenerator-runtime -- Copyright (c) 2014-present, Facebook, Inc. -- license (MIT): https://github.com/babel/babel/blob/main/packages/babel-helpers/LICENSE */
 
+  // eslint-disable-next-line no-unassigned-vars
   var undefined: undefined; // More compressible than void 0.
   var $Symbol =
     typeof Symbol === "function" ? Symbol : ({} as SymbolConstructor);
@@ -328,10 +329,19 @@ export default function /* @no-mangle */ _regenerator() {
 
         if (_type > 3 /* Finish */) {
           if ((shouldReturn = finallyLoc === _arg)) {
-            method = entry[4]! || OperatorType.Jump;
-            arg = entry[5] === undefined ? entry[3]! : entry[5];
-            entry[4] = OperatorType.Jump;
-            entry[5] = undefined;
+            // The following code logic is equivalent to the commented code.
+            // if ((method = entry[4]!)) {
+            //   arg = entry[5];
+            // } else {
+            //   method = OperatorType.Jump;
+            //   arg = entry[3];
+            // }
+            arg =
+              entry[
+                // eslint-disable-next-line no-cond-assign
+                (method = entry[4]!) ? 5 : ((method = OperatorType.Jump), 3)
+              ];
+            entry[4] = entry[5] = undefined;
           }
         } else {
           if (entry[0] <= prev) {
@@ -351,9 +361,7 @@ export default function /* @no-mangle */ _regenerator() {
                   _arg > finallyLoc)
               ) {
                 entry[4] = _type as
-                  | OperatorType.Return
-                  | OperatorType.Jump
-                  | OperatorType.Throw;
+                  OperatorType.Return | OperatorType.Jump | OperatorType.Throw;
                 entry[5] = _arg;
                 ctx.n = finallyLoc;
                 method = OperatorType.Next;
