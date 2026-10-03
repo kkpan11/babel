@@ -5,7 +5,7 @@ import type { ExpressionErrors } from "../parser/util.ts";
 
 export default (superClass: typeof Parser) =>
   class V8IntrinsicMixin extends superClass implements Parser {
-    parseV8Intrinsic(): N.Expression {
+    parseV8Intrinsic(): N.Expression | undefined {
       if (this.match(tt.modulo)) {
         const v8IntrinsicStartLoc = this.state.startLoc;
         // let the `loc` of Identifier starts from `%`
@@ -27,7 +27,9 @@ export default (superClass: typeof Parser) =>
      * parser/expression.js                                         *
      * ============================================================ */
 
-    parseExprAtom(refExpressionErrors?: ExpressionErrors | null): N.Expression {
+    parseExprAtom(
+      refExpressionErrors?: ExpressionErrors | null,
+    ): N.Expression | N.Super | N.Import {
       return (
         this.parseV8Intrinsic() || super.parseExprAtom(refExpressionErrors)
       );

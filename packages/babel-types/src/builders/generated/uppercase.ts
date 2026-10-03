@@ -7,19 +7,15 @@ import * as b from "./lowercase.ts";
 import deprecationWarning from "../../utils/deprecationWarning.ts";
 
 function alias<const N extends keyof typeof b>(lowercase: N): (typeof b)[N] {
-  if (process.env.BABEL_8_BREAKING) {
-    return function () {
-      deprecationWarning(
-        lowercase.replace(/^(?:ts|jsx|[a-z])/, x => x.toUpperCase()),
-        lowercase,
-        "Usage of builders starting with an uppercase letter such as ",
-        "uppercase builders",
-      );
-      return (b[lowercase] as any)(...arguments);
-    } as any;
-  } else {
-    return b[lowercase];
-  }
+  return function () {
+    deprecationWarning(
+      lowercase.replace(/^(?:ts|jsx|[a-z])/, x => x.toUpperCase()),
+      lowercase,
+      "Usage of builders starting with an uppercase letter such as ",
+      "uppercase builders",
+    );
+    return (b[lowercase] as any)(...arguments);
+  } as any;
 }
 
 export const ArrayExpression = alias("arrayExpression"),
@@ -88,7 +84,6 @@ export const ArrayExpression = alias("arrayExpression"),
   ImportDefaultSpecifier = alias("importDefaultSpecifier"),
   ImportNamespaceSpecifier = alias("importNamespaceSpecifier"),
   ImportSpecifier = alias("importSpecifier"),
-  ImportExpression = alias("importExpression"),
   MetaProperty = alias("metaProperty"),
   ClassMethod = alias("classMethod"),
   ObjectPattern = alias("objectPattern"),
@@ -99,13 +94,13 @@ export const ArrayExpression = alias("arrayExpression"),
   TemplateLiteral = alias("templateLiteral"),
   YieldExpression = alias("yieldExpression"),
   AwaitExpression = alias("awaitExpression"),
+  ImportExpression = alias("importExpression"),
   Import = alias("import"),
   BigIntLiteral = alias("bigIntLiteral"),
   ExportNamespaceSpecifier = alias("exportNamespaceSpecifier"),
   OptionalMemberExpression = alias("optionalMemberExpression"),
   OptionalCallExpression = alias("optionalCallExpression"),
   ClassProperty = alias("classProperty"),
-  ClassAccessorProperty = alias("classAccessorProperty"),
   ClassPrivateProperty = alias("classPrivateProperty"),
   ClassPrivateMethod = alias("classPrivateMethod"),
   PrivateName = alias("privateName"),
@@ -141,6 +136,7 @@ export const ArrayExpression = alias("arrayExpression"),
   EmptyTypeAnnotation = alias("emptyTypeAnnotation"),
   NullableTypeAnnotation = alias("nullableTypeAnnotation"),
   NumberLiteralTypeAnnotation = alias("numberLiteralTypeAnnotation"),
+  BigIntLiteralTypeAnnotation = alias("bigIntLiteralTypeAnnotation"),
   NumberTypeAnnotation = alias("numberTypeAnnotation"),
   ObjectTypeAnnotation = alias("objectTypeAnnotation"),
   ObjectTypeInternalSlot = alias("objectTypeInternalSlot"),
@@ -191,22 +187,17 @@ export const ArrayExpression = alias("arrayExpression"),
   JSXFragment = alias("jsxFragment"),
   JSXOpeningFragment = alias("jsxOpeningFragment"),
   JSXClosingFragment = alias("jsxClosingFragment"),
-  Noop = alias("noop"),
   Placeholder = alias("placeholder"),
   V8IntrinsicIdentifier = alias("v8IntrinsicIdentifier"),
   ArgumentPlaceholder = alias("argumentPlaceholder"),
   BindExpression = alias("bindExpression"),
+  ClassAccessorProperty = alias("classAccessorProperty"),
   Decorator = alias("decorator"),
   DoExpression = alias("doExpression"),
   ExportDefaultSpecifier = alias("exportDefaultSpecifier"),
-  RecordExpression = alias("recordExpression"),
-  TupleExpression = alias("tupleExpression"),
-  DecimalLiteral = alias("decimalLiteral"),
   ModuleExpression = alias("moduleExpression"),
   TopicReference = alias("topicReference"),
-  PipelineTopicExpression = alias("pipelineTopicExpression"),
-  PipelineBareFunction = alias("pipelineBareFunction"),
-  PipelinePrimaryTopicReference = alias("pipelinePrimaryTopicReference"),
+  VoidPattern = alias("voidPattern"),
   TSParameterProperty = alias("tsParameterProperty"),
   TSDeclareFunction = alias("tsDeclareFunction"),
   TSDeclareMethod = alias("tsDeclareMethod"),
@@ -251,7 +242,8 @@ export const ArrayExpression = alias("arrayExpression"),
   TSMappedType = alias("tsMappedType"),
   TSTemplateLiteralType = alias("tsTemplateLiteralType"),
   TSLiteralType = alias("tsLiteralType"),
-  TSExpressionWithTypeArguments = alias("tsExpressionWithTypeArguments"),
+  TSClassImplements = alias("tsClassImplements"),
+  TSInterfaceHeritage = alias("tsInterfaceHeritage"),
   TSInterfaceDeclaration = alias("tsInterfaceDeclaration"),
   TSInterfaceBody = alias("tsInterfaceBody"),
   TSTypeAliasDeclaration = alias("tsTypeAliasDeclaration"),
@@ -274,7 +266,3 @@ export const ArrayExpression = alias("arrayExpression"),
   TSTypeParameterInstantiation = alias("tsTypeParameterInstantiation"),
   TSTypeParameterDeclaration = alias("tsTypeParameterDeclaration"),
   TSTypeParameter = alias("tsTypeParameter");
-export const NumberLiteral = b.numberLiteral,
-  RegexLiteral = b.regexLiteral,
-  RestProperty = b.restProperty,
-  SpreadProperty = b.spreadProperty;
