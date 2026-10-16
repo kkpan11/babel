@@ -2,9 +2,9 @@ import type { Node } from "@babel/types";
 import type NodePath from "./path/index.ts";
 import type Scope from "./scope/index.ts";
 
-let pathsCache: WeakMap<Node, Map<Node, NodePath>> = new WeakMap();
+let pathsCache = new WeakMap<Node, Map<Node, NodePath>>();
 export { pathsCache as path };
-export let scope: WeakMap<Node, Scope> = new WeakMap();
+export let scope = new WeakMap<Node, Scope>();
 
 export function clear() {
   clearPath();
@@ -19,15 +19,16 @@ export function clearScope() {
   scope = new WeakMap();
 }
 
-export function getCachedPaths(path: NodePath) {
+export function getCachedPaths(path: NodePath<Node | null>) {
   const { parent, parentPath } = path;
-  return process.env.BABEL_8_BREAKING && parentPath
-    ? parentPath._store
-    : pathsCache.get(parent);
+  return parentPath ? parentPath._store : pathsCache.get(parent);
 }
 
-export function getOrCreateCachedPaths(node: Node, parentPath?: NodePath) {
-  if (process.env.BABEL_8_BREAKING && parentPath) {
+export function getOrCreateCachedPaths(
+  node: Node,
+  parentPath?: NodePath | null,
+) {
+  if (parentPath) {
     return (parentPath._store ||= new Map());
   }
 

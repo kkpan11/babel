@@ -6,13 +6,13 @@ import {
 } from "./plugin-utils.ts";
 export type {
   PluginConfig as ParserPlugin,
-  DecoratorsPluginOptions,
   FlowPluginOptions,
   PipelineOperatorPluginOptions,
-  RecordAndTuplePluginOptions,
   TypeScriptPluginOptions,
-} from "./typings.ts";
+} from "./typings.d.ts";
 import Parser, { type PluginsMap } from "./parser/index.ts";
+import type { ParseError } from "./parse-error.ts";
+export type { ParseError };
 
 import type { ExportedTokenType } from "./tokenizer/types.ts";
 import {
@@ -29,12 +29,10 @@ export type { Expression, File };
 
 export type ParserOptions = Partial<Options>;
 
-export interface ParseError {
-  code: string;
-  reasonCode: string;
-}
 export type ParseResult<Result extends File | Expression = File> = Result & {
-  errors: null | ParseError[];
+  comments: File["comments"];
+  errors: ParseError[];
+  tokens?: File["tokens"];
 };
 
 /**
@@ -54,7 +52,7 @@ export function parse(
       const ast = parser.parse();
 
       if (parser.sawUnambiguousESM) {
-        return ast as unknown as ParseResult<File>;
+        return ast;
       }
 
       if (parser.ambiguousScriptDifferentAst) {
@@ -65,10 +63,7 @@ export function parse(
         // can be parsed either as an AwaitExpression, or as two ExpressionStatements.
         try {
           options.sourceType = "script";
-          return getParser(
-            options,
-            input,
-          ).parse() as unknown as ParseResult<File>;
+          return getParser(options, input).parse();
         } catch {}
       } else {
         // This is both a valid module and a valid script, but
@@ -76,20 +71,17 @@ export function parse(
         ast.program.sourceType = "script";
       }
 
-      return ast as unknown as ParseResult<File>;
+      return ast;
     } catch (moduleError) {
       try {
         options.sourceType = "script";
-        return getParser(
-          options,
-          input,
-        ).parse() as unknown as ParseResult<File>;
+        return getParser(options, input).parse();
       } catch {}
 
       throw moduleError;
     }
   } else {
-    return getParser(options, input).parse() as unknown as ParseResult<File>;
+    return getParser(options, input).parse();
   }
 }
 
@@ -101,7 +93,7 @@ export function parseExpression(
   if (parser.options.strictMode) {
     parser.state.strict = true;
   }
-  return parser.getExpression() as unknown as ParseResult<Expression>;
+  return parser.getExpression();
 }
 
 function generateExportedTokenTypes(
@@ -118,7 +110,10 @@ function generateExportedTokenTypes(
 
 export const tokTypes = generateExportedTokenTypes(internalTokenTypes);
 
-function getParser(options: Options | undefined | null, input: string): Parser {
+function getParser(
+  options: ParserOptions | undefined | null,
+  input: string,
+): Parser {
   let cls = Parser;
   const pluginsMap: PluginsMap = new Map();
   if (options?.plugins) {
@@ -153,7 +148,7 @@ function getParserClass(
     }
   }
   const key = pluginList.join("|");
-  let cls = parserClassCache.get(key);
+  let cls = parserClassCache.get(key)!;
   if (!cls) {
     cls = Parser;
     for (const plugin of pluginList) {
@@ -163,4 +158,18 @@ function getParserClass(
     parserClassCache.set(key, cls);
   }
   return cls;
+}
+
+export function getLine(locData: Uint32Array, pos: number): number {
+  if (pos < 0 || pos * 2 >= locData.length) {
+    throw new Error(`Position ${pos} is out of bounds for location data.`);
+  }
+  return locData[pos * 2];
+}
+
+export function getColumn(locData: Uint32Array, pos: number): number {
+  if (pos < 0 || pos * 2 + 1 >= locData.length) {
+    throw new Error(`Position ${pos} is out of bounds for location data.`);
+  }
+  return locData[pos * 2 + 1];
 }

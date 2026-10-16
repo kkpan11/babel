@@ -3,12 +3,13 @@ import { parse, type ParseResult } from "@babel/parser";
 import { codeFrameColumns } from "@babel/code-frame";
 import generateMissingPluginMessage from "./util/missing-plugin-helper.ts";
 import type { PluginPasses } from "../config/index.ts";
+import type { ResolvedOptions } from "../config/validation/options.ts";
 
 export type { ParseResult };
 
 export default function* parser(
   pluginPasses: PluginPasses,
-  { parserOpts, highlightCode = true, filename = "unknown" }: any,
+  { parserOpts, highlightCode = true, filename = "unknown" }: ResolvedOptions,
   code: string,
 ): Handler<ParseResult> {
   try {
@@ -49,6 +50,13 @@ export default function* parser(
       // err.code will be changed to BABEL_PARSE_ERROR later.
     }
 
+    const startLine = parserOpts?.startLine;
+    const startColumn = parserOpts?.startColumn;
+
+    if (startColumn != null) {
+      code = " ".repeat(startColumn) + code;
+    }
+
     const { loc, missingPlugin } = err;
     if (loc) {
       const codeFrame = codeFrameColumns(
@@ -56,11 +64,12 @@ export default function* parser(
         {
           start: {
             line: loc.line,
-            column: loc.column + 1,
+            column: loc.column,
           },
         },
         {
           highlightCode,
+          startLine: startLine,
         },
       );
       if (missingPlugin) {

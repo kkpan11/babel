@@ -9,22 +9,22 @@ import { unshiftForXStatementBody } from "@babel/plugin-transform-destructuring"
 
 // @babel/types <=7.3.3 counts FOO as referenced in var { x: FOO }.
 // We need to detect this bug to know if "unused" means 0 or 1 references.
-if (!process.env.BABEL_8_BREAKING) {
-  const node = t.identifier("a");
-  const property = t.objectProperty(t.identifier("key"), node);
-  const pattern = t.objectPattern([property]);
-
-  // eslint-disable-next-line no-var
-  var ZERO_REFS = t.isReferenced(node, property, pattern) ? 1 : 0;
-}
 
 export interface Options {
   useBuiltIns?: boolean;
+  /** @deprecated Use the `ignoreFunctionLength`, `objectRestNoSymbols`, `pureGetters`, and `setSpreadProperties` assumptions instead. */
   loose?: boolean;
 }
 
 export default declare((api, opts: Options) => {
-  api.assertVersion(REQUIRED_VERSION(7));
+  api.assertVersion(REQUIRED_VERSION("^7.0.0-0 || ^8.0.0"));
+
+  if ("loose" in opts) {
+    console.warn(
+      "@babel/plugin-transform-object-rest-spread: The 'loose' option has been deprecated, " +
+        "use the `ignoreFunctionLength`, `objectRestNoSymbols`, `pureGetters`, and `setSpreadProperties` assumptions instead (https://babeljs.io/assumptions).",
+    );
+  }
 
   const targets = api.targets();
   const supportsObjectAssign = !isRequired("Object.assign", targets, {
@@ -51,7 +51,7 @@ export default declare((api, opts: Options) => {
   }
 
   function* iterateObjectRestElement(
-    path: NodePath<t.LVal>,
+    path: NodePath<t.LVal | t.PatternLike | t.TSParameterProperty | null>,
   ): Generator<NodePath<t.RestElement>> {
     switch (path.type) {
       case "ArrayPattern":
@@ -82,13 +82,15 @@ export default declare((api, opts: Options) => {
     }
   }
 
-  function hasObjectRestElement(path: NodePath<t.LVal>): boolean {
+  function hasObjectRestElement(
+    path: NodePath<t.LVal | t.PatternLike | t.TSParameterProperty>,
+  ): boolean {
     const objectRestPatternIterator = iterateObjectRestElement(path);
     return !objectRestPatternIterator.next().done;
   }
 
   function visitObjectRestElements(
-    path: NodePath<t.LVal>,
+    path: NodePath<t.LVal | t.PatternLike>,
     visitor: (path: NodePath<t.RestElement>) => void,
   ) {
     for (const restElementPath of iterateObjectRestElement(path)) {
@@ -111,15 +113,18 @@ export default declare((api, opts: Options) => {
   // from ast of {a: "foo", b, 3: "bar", [++x]: "baz"}
   // `allPrimitives: false` doesn't necessarily mean that there is a non-primitive, but just
   // that we are not sure.
-  function extractNormalizedKeys(node: t.ObjectPattern) {
+  function extractNormalizedKeys(pattern: NodePath<t.ObjectPattern>) {
     // RestElement has been removed in createObjectRest
-    const props = node.properties as t.ObjectProperty[];
+    const propsList: t.ObjectProperty[] = pattern
+      .get("properties")
+      .map((p: NodePath) => p.node as t.ObjectProperty);
+
     const keys: t.Expression[] = [];
     let allPrimitives = true;
     let hasTemplateLiteral = false;
 
-    for (const prop of props) {
-      const { key } = prop;
+    for (const prop of propsList) {
+      const key = prop.key;
       if (t.isIdentifier(key) && !prop.computed) {
         // since a key {a: 3} is equivalent to {"a": 3}, use the latter
         keys.push(t.stringLiteral(key.name));
@@ -136,14 +141,24 @@ export default declare((api, opts: Options) => {
           ),
         );
       } else {
-        // @ts-expect-error private name has been handled by destructuring-private
-        keys.push(t.cloneNode(key));
+        // If the key is an inline memoization assignment (e.g. _key = expr),
+        // use just the identifier part for the exclusion array
+        if (t.isAssignmentExpression(key) && t.isIdentifier(key.left)) {
+          // For inline memoized keys, use just the left side (the identifier)
+          // to avoid evaluating the assignment expression multiple times
+          keys.push(t.cloneNode(key.left));
+        } else {
+          // @ts-expect-error private name has been handled by destructuring-private
+          keys.push(t.cloneNode(key));
+        }
 
+        // Check the original key for primitiveness
+        const keyToCheck = t.isAssignmentExpression(key) ? key.right : key;
         if (
-          (t.isMemberExpression(key, { computed: false }) &&
-            t.isIdentifier(key.object, { name: "Symbol" })) ||
-          (t.isCallExpression(key) &&
-            t.matchesPattern(key.callee, "Symbol.for"))
+          (t.isMemberExpression(keyToCheck, { computed: false }) &&
+            t.isIdentifier(keyToCheck.object, { name: "Symbol" })) ||
+          (t.isCallExpression(keyToCheck) &&
+            t.matchesPattern(keyToCheck.callee, "Symbol.for"))
         ) {
           // there all return a primitive
         } else {
@@ -155,24 +170,53 @@ export default declare((api, opts: Options) => {
     return { keys, allPrimitives, hasTemplateLiteral };
   }
 
-  // replaces impure computed keys with new identifiers
-  // and returns variable declarators of these new identifiers
+  /**
+   * Replaces computed keys that have side effects with inline memoization.
+   *
+   * Example: { [foo()]: x } becomes { [_temp = foo()]: x } with upfront declaration: var _temp;
+   *
+   * This function is called in multiple places during transformation. To avoid creating
+   * duplicate temp variables, we skip properties that were already memoized inline by
+   * checking if the key is an assignment expression with a UID identifier.
+   */
   function replaceImpureComputedKeys(
     properties: NodePath<t.ObjectProperty>[],
     scope: Scope,
   ) {
-    const impureComputedPropertyDeclarators: t.VariableDeclarator[] = [];
-    for (const propPath of properties) {
+    const tempVariableDeclarations: t.VariableDeclarator[] = [];
+
+    for (const property of properties) {
       // PrivateName is handled in destructuring-private plugin
-      const key = propPath.get("key") as NodePath<t.Expression>;
-      if (propPath.node.computed && !key.isPure()) {
-        const name = scope.generateUidBasedOnNode(key.node);
-        const declarator = t.variableDeclarator(t.identifier(name), key.node);
-        impureComputedPropertyDeclarators.push(declarator);
-        key.replaceWith(t.identifier(name));
+      const keyExpression = property.get("key") as NodePath<t.Expression>;
+
+      // Skip if already memoised (inline assignment expression with a UID)
+      // This happens when inline memoization is used for nested object rest
+      if (
+        keyExpression.isAssignmentExpression() &&
+        keyExpression.get("left").isIdentifier()
+      ) {
+        const identName = (keyExpression.node.left as t.Identifier).name;
+        // Check if it's a UID (hasUid already searches parent scopes)
+        if (scope.hasUid(identName)) {
+          continue;
+        }
+      }
+
+      // Only process computed keys that have side effects (function calls, mutations, etc.)
+      if (property.node.computed && !keyExpression.isPure()) {
+        const tempVariableName = scope.generateUidBasedOnNode(
+          keyExpression.node,
+        );
+        const tempVariableDeclaration = t.variableDeclarator(
+          t.identifier(tempVariableName),
+          keyExpression.node,
+        );
+        tempVariableDeclarations.push(tempVariableDeclaration);
+        keyExpression.replaceWith(t.identifier(tempVariableName));
       }
     }
-    return impureComputedPropertyDeclarators;
+
+    return tempVariableDeclarations;
   }
 
   function removeUnusedExcludedKeys(path: NodePath<t.ObjectPattern>): void {
@@ -181,14 +225,69 @@ export default declare((api, opts: Options) => {
     Object.keys(bindings).forEach(bindingName => {
       const bindingParentPath = bindings[bindingName].parentPath;
       if (
-        path.scope.getBinding(bindingName).references >
-          (process.env.BABEL_8_BREAKING ? 0 : ZERO_REFS) ||
+        path.scope.getBinding(bindingName)!.references > 0 ||
         !bindingParentPath.isObjectProperty()
       ) {
         return;
       }
       bindingParentPath.remove();
     });
+  }
+
+  /**
+   * Finds all computed property keys in a destructuring pattern,
+   * in the order they appear in the source code.
+   *
+   * Example: const { [a()]: { [b()]: x, ...rest }, [c()]: y } = obj
+   * Returns: [a(), b(), c()] in that order
+   *
+   * This is needed because when nested patterns have rest elements (...rest),
+   * the transformation splits them up, but need to ensure a(), b(), c()
+   * are always evaluated in this exact order (left-to-right as written).
+   */
+  function collectComputedKeysInSourceOrder(
+    destructuringPattern: NodePath<t.ObjectPattern>,
+  ): NodePath<t.ObjectProperty>[] {
+    const computedProperties: NodePath<t.ObjectProperty>[] = [];
+
+    function visitPattern(pattern: NodePath<t.PatternLike | t.LVal>) {
+      if (pattern.isObjectPattern()) {
+        const properties = pattern.get("properties") as NodePath<
+          t.ObjectProperty | t.RestElement
+        >[];
+        for (const property of properties) {
+          if (property.isRestElement()) continue;
+
+          // If this property has a computed key like [someExpression], collect it
+          if (property.node.computed) {
+            computedProperties.push(property);
+          }
+
+          // Then look inside the property's value for more nested patterns
+          const nestedPattern = property.get(
+            "value",
+          ) as NodePath<t.PatternLike>;
+          visitPattern(nestedPattern);
+        }
+      } else if (pattern.isArrayPattern()) {
+        for (const element of pattern.get("elements")) {
+          if (!element) continue;
+          if (element.isRestElement()) {
+            const restArgument = element.get("argument") as NodePath<
+              t.PatternLike | t.LVal
+            >;
+            visitPattern(restArgument);
+          } else {
+            visitPattern(element as NodePath<t.PatternLike | t.LVal>);
+          }
+        }
+      } else if (pattern.isAssignmentPattern()) {
+        visitPattern(pattern.get("left"));
+      }
+    }
+
+    visitPattern(destructuringPattern);
+    return computedProperties;
   }
 
   //expects path to an object pattern
@@ -211,9 +310,8 @@ export default declare((api, opts: Options) => {
       path.get("properties") as NodePath<t.ObjectProperty>[],
       path.scope,
     );
-    const { keys, allPrimitives, hasTemplateLiteral } = extractNormalizedKeys(
-      path.node,
-    );
+    const { keys, allPrimitives, hasTemplateLiteral } =
+      extractNormalizedKeys(path);
 
     if (keys.length === 0) {
       return [
@@ -243,7 +341,7 @@ export default declare((api, opts: Options) => {
 
       if (!hasTemplateLiteral && !t.isProgram(path.scope.block)) {
         // Hoist definition of excluded keys, so that it's not created each time.
-        const program = path.findParent(path => path.isProgram());
+        const program = path.findParent(path => path.isProgram())!;
         const id = path.scope.generateUidIdentifier("excluded");
 
         program.scope.push({
@@ -271,7 +369,7 @@ export default declare((api, opts: Options) => {
   function replaceRestElement(
     parentPath: NodePath<t.Function | t.CatchClause>,
     paramPath: NodePath<
-      t.Function["params"][number] | t.AssignmentPattern["left"]
+      t.Function["params"][number] | t.AssignmentPattern["left"] | null
     >,
     container?: t.VariableDeclaration[],
   ): void {
@@ -310,10 +408,7 @@ export default declare((api, opts: Options) => {
 
   return {
     name: "transform-object-rest-spread",
-    manipulateOptions: process.env.BABEL_8_BREAKING
-      ? undefined
-      : (_, parser) => parser.plugins.push("objectRestSpread"),
-
+    manipulateOptions: undefined,
     visitor: {
       // function a({ b, ...c }) {}
       Function(path) {
@@ -336,7 +431,7 @@ export default declare((api, opts: Options) => {
         let idInRest = false;
 
         const IdentifierHandler = function (
-          path: NodePath<t.Identifier>,
+          path: NodePath<t.Identifier | t.JSXIdentifier>,
           functionScope: Scope,
         ) {
           const name = path.node.name;
@@ -381,6 +476,7 @@ export default declare((api, opts: Options) => {
             path,
             ignoreFunctionLength,
             shouldTransformParam,
+            // @ts-expect-error strictFunctionTypes
             replaceRestElement,
           );
         }
@@ -395,6 +491,83 @@ export default declare((api, opts: Options) => {
 
         let insertionPath = path;
         const originalPath = path;
+
+        /**
+         * Fix for: https://github.com/babel/babel/issues/17274
+         *
+         * Problem: When you have nested destructuring with computed keys and rest elements:
+         *   const { [log(0)]: { [log(1)]: x, ...rest }, [log(2)]: y } = obj
+         *
+         * The functions log(0), log(1), log(2) must be called in that exact order.
+         * But without this fix, the nested pattern gets processed first, causing the wrong order.
+         *
+         * Additionally, with default values:
+         *   const { [log(0)]: x = log(1), [log(2)]: y } = obj
+         *
+         * The order must be: log(0), then log(1) (if x is undefined), then log(2).
+         *
+         * Solution: Use inline memoization with assignment expressions.
+         * Transform:
+         *   const { [log(0)]: { [log(1)]: x, ...rest }, [log(2)]: y } = obj
+         * Into:
+         *   var _log, _log2, _log3;
+         *   const { [_log = log(0)]: { [_log2 = log(1)]: x, ...rest }, [_log3 = log(2)]: y } = obj
+         *
+         * This preserves correct evaluation order even with default values.
+         */
+
+        // Only memoize computed keys if there are rest elements that require this fix
+        if (hasObjectRestElement(path.get("id"))) {
+          // Find all computed keys (like [someExpression]) in left-to-right order
+          const destructuringPattern = originalPath.get(
+            "id",
+          ) as NodePath<t.ObjectPattern>;
+          const propertiesWithComputedKeys =
+            collectComputedKeysInSourceOrder(destructuringPattern);
+
+          // For each computed key that has side effects (not a simple variable)
+          for (const property of propertiesWithComputedKeys) {
+            const computedKeyExpression = property.get(
+              "key",
+            ) as NodePath<t.Expression>;
+
+            // Skip if already memoised (assignment expression with a UID)
+            if (
+              computedKeyExpression.isAssignmentExpression() &&
+              computedKeyExpression.get("left").isIdentifier() &&
+              originalPath.scope.hasUid(
+                (computedKeyExpression.node.left as t.Identifier).name,
+              )
+            ) {
+              continue;
+            }
+
+            // Check if the expression has side effects (function call, ++x, etc.)
+            if (!computedKeyExpression.isPure()) {
+              // Create a temporary variable identifier
+              const tempVariableName =
+                originalPath.scope.generateUidBasedOnNode(
+                  computedKeyExpression.node,
+                );
+              const tempIdentifier = t.identifier(tempVariableName);
+
+              // Declare the variable upfront with no initializer (var declaration)
+              originalPath.scope.push({
+                id: tempIdentifier,
+                kind: "var",
+              });
+
+              // Replace [log(0)] with [_key = log(0)] for inline memoization
+              computedKeyExpression.replaceWith(
+                t.assignmentExpression(
+                  "=",
+                  t.cloneNode(tempIdentifier),
+                  computedKeyExpression.node,
+                ),
+              );
+            }
+          }
+        }
 
         visitObjectRestElements(path.get("id"), path => {
           if (
@@ -426,15 +599,16 @@ export default declare((api, opts: Options) => {
 
           let ref = originalPath.node.init;
           const refPropertyPath: NodePath<t.ObjectProperty>[] = [];
-          let kind;
+          let kind: "const" | "let" | "var" | undefined;
 
           path.findParent((path: NodePath): boolean => {
             if (path.isObjectProperty()) {
               refPropertyPath.unshift(path);
             } else if (path.isVariableDeclarator()) {
-              kind = path.parentPath.node.kind;
+              kind = path.parentPath.node.kind as "const" | "let" | "var";
               return true;
             }
+            return false;
           });
 
           const impureObjRefComputedDeclarators = replaceImpureComputedKeys(
@@ -442,11 +616,21 @@ export default declare((api, opts: Options) => {
             path.scope,
           );
           refPropertyPath.forEach(prop => {
-            const { node } = prop;
+            // Get the current key (which may have been transformed to an inline assignment)
+            const keyPath = prop.get("key") as NodePath<t.Expression>;
+            let keyForMemberExpression: t.Expression = keyPath.node;
+
+            // If the key is an inline memoization assignment, use just the identifier
+            if (t.isAssignmentExpression(keyPath.node)) {
+              // For inline memoized keys, extract just the left side (the identifier)
+              // to avoid re-evaluating the assignment expression
+              keyForMemberExpression = keyPath.node.left as t.Expression;
+            }
+
             ref = t.memberExpression(
-              ref,
-              t.cloneNode(node.key),
-              node.computed || t.isLiteral(node.key),
+              ref!,
+              t.cloneNode(keyForMemberExpression),
+              prop.node.computed || t.isLiteral(keyPath.node),
             );
           });
 
@@ -472,15 +656,15 @@ export default declare((api, opts: Options) => {
 
           insertionPath = insertionPath.insertAfter(
             t.variableDeclarator(argument, callExpression),
-          )[0] as NodePath<t.VariableDeclarator>;
+          )[0];
 
-          path.scope.registerBinding(kind, insertionPath);
+          path.scope.registerBinding(kind!, insertionPath);
 
           if (objectPatternPath.node.properties.length === 0) {
             objectPatternPath
               .findParent(
                 path => path.isObjectProperty() || path.isVariableDeclarator(),
-              )
+              )!
               .remove();
           }
         });
@@ -497,21 +681,12 @@ export default declare((api, opts: Options) => {
           .some(path => hasObjectRestElement(path.get("id")));
         if (!hasRest) return;
 
-        const specifiers = [];
-
-        for (const name of Object.keys(path.getOuterBindingIdentifiers(true))) {
-          specifiers.push(
-            t.exportSpecifier(t.identifier(name), t.identifier(name)),
-          );
-        }
-
         // Split the declaration and export list into two declarations so that the variable
         // declaration can be split up later without needing to worry about not being a
         // top-level statement.
-        path.replaceWith(declaration.node);
-        path.insertAfter(t.exportNamedDeclaration(null, specifiers));
-      },
 
+        path.splitExportDeclaration();
+      },
       // try {} catch ({a, ...b}) {}
       CatchClause(path) {
         const paramPath = path.get("param");
@@ -583,7 +758,7 @@ export default declare((api, opts: Options) => {
           // but the new do-expression proposal plans to ban iteration ends in the
           // do block, maybe we can get rid of this
           if (statementBody.length === 0 && path.isCompletionRecord()) {
-            nodes.unshift(t.expressionStatement(scope.buildUndefinedNode()));
+            nodes.unshift(t.expressionStatement(t.buildUndefinedNode()));
           }
 
           nodes.unshift(
@@ -642,7 +817,7 @@ export default declare((api, opts: Options) => {
         if (objectPatterns.length > 0) {
           const patternParentPath = path.findParent(
             path => !(path.isPattern() || path.isObjectProperty()),
-          );
+          )!;
           const patternParent = patternParentPath.node;
           switch (patternParent.type) {
             case "VariableDeclarator":
@@ -680,25 +855,10 @@ export default declare((api, opts: Options) => {
         if (setSpreadProperties) {
           helper = getExtendsHelper(file);
         } else {
-          if (process.env.BABEL_8_BREAKING) {
-            helper = file.addHelper("objectSpread2");
-          } else {
-            try {
-              helper = file.addHelper("objectSpread2");
-            } catch {
-              // TODO: This is needed to workaround https://github.com/babel/babel/issues/10187
-              // and https://github.com/babel/babel/issues/10179 for older @babel/core versions
-              // where #10187 isn't fixed.
-              this.file.declarations.objectSpread2 = null;
-
-              // objectSpread2 has been introduced in v7.5.0
-              // We have to maintain backward compatibility.
-              helper = file.addHelper("objectSpread");
-            }
-          }
+          helper = file.addHelper("objectSpread2");
         }
 
-        let exp: t.CallExpression = null;
+        let exp: t.CallExpression | null = null;
         let props: t.ObjectMember[] = [];
 
         function make() {
@@ -732,7 +892,7 @@ export default declare((api, opts: Options) => {
         for (const prop of path.node.properties) {
           if (t.isSpreadElement(prop)) {
             make();
-            exp.arguments.push(prop.argument);
+            exp!.arguments.push(prop.argument);
           } else {
             props.push(prop);
           }
@@ -740,7 +900,7 @@ export default declare((api, opts: Options) => {
 
         if (props.length) make();
 
-        path.replaceWith(exp);
+        path.replaceWith(exp!);
       },
     },
   };
