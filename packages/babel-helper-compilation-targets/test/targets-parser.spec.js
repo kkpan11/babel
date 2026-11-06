@@ -1,7 +1,6 @@
 import browserslist from "browserslist";
-import _getTargets from "../lib/index.js";
-const getTargets = _getTargets.default || _getTargets;
-import { itBabel8, itBabel7, commonJS } from "$repo-utils";
+import getTargets from "../lib/index.js";
+import { commonJS } from "$repo-utils";
 const { require } = commonJS(import.meta.url);
 
 // Strip prerelease tag
@@ -74,9 +73,8 @@ describe("getTargets", () => {
       delete process.env.BROWSERSLIST_CONFIG;
     });
     it("should provide fallback to any targets option", () => {
-      process.env.BROWSERSLIST_CONFIG = require.resolve(
-        "./fixtures/.browserslistrc",
-      );
+      process.env.BROWSERSLIST_CONFIG =
+        require.resolve("./fixtures/.browserslistrc");
       expect(getTargets()).toEqual({ firefox: "30.0.0", chrome: "70.0.0" });
     });
   });
@@ -228,7 +226,7 @@ describe("getTargets", () => {
 
     it("returns browsers supporting modules", () => {
       expect(baseESModulesTargets).toMatchInlineSnapshot(`
-        Object {
+        {
           "android": "61.0.0",
           "chrome": "61.0.0",
           "edge": "16.0.0",
@@ -243,41 +241,14 @@ describe("getTargets", () => {
       `);
     });
 
-    itBabel7(
-      "returns browsers supporting modules, ignoring browsers key",
-      () => {
-        expect(
-          getTargets({
-            esmodules: true,
-            browsers: "ie 8",
-          }),
-        ).toEqual(baseESModulesTargets);
-      },
-    );
-
-    itBabel7(
-      "returns browsers supporting modules, intersect with browsers key",
-      () => {
-        expect(
-          getTargets({
-            esmodules: "intersect",
-            browsers: "ie 8",
-          }),
-        ).toEqual({});
-      },
-    );
-
-    itBabel8(
-      "returns browsers supporting modules, intersect with browsers key",
-      () => {
-        expect(
-          getTargets({
-            esmodules: true,
-            browsers: "ie 8",
-          }),
-        ).toEqual({});
-      },
-    );
+    it("returns browsers supporting modules, intersect with browsers key", () => {
+      expect(
+        getTargets({
+          esmodules: true,
+          browsers: "ie 8",
+        }),
+      ).toEqual({});
+    });
 
     it("returns browser supporting modules and keyed browser overrides", () => {
       expect(
@@ -288,67 +259,17 @@ describe("getTargets", () => {
       ).toEqual({ ...baseESModulesTargets, ie: "11.0.0" });
     });
 
-    itBabel7(
-      "returns browser supporting modules and  keyed browser overrides",
-      () => {
-        expect(
-          getTargets({
-            esmodules: "intersect",
-            ie: 11,
-          }),
-        ).toEqual({ ...baseESModulesTargets, ie: "11.0.0" });
-      },
-    );
-
-    itBabel7(
-      "returns browser supporting modules and keyed browser overrides, ignoring browsers field",
-      () => {
-        expect(
-          getTargets({
-            esmodules: true,
-            browsers: "ie 10",
-            ie: 11,
-          }),
-        ).toEqual({ ...baseESModulesTargets, ie: "11.0.0" });
-      },
-    );
-
-    itBabel7(
-      "returns browser supporting modules, intersect with browsers key, then combined with keyed browser overrides, ",
-      () => {
-        expect(
-          getTargets({
-            esmodules: "intersect",
-            browsers: "ie 10",
-            ie: 11,
-          }),
-        ).toEqual({ ie: "11.0.0" });
-      },
-    );
-
-    itBabel8(
-      "returns browser supporting modules, intersect with browsers key, then combined with keyed browser overrides, ",
-      () => {
-        expect(
-          getTargets({
-            esmodules: true,
-            browsers: "ie 10",
-            ie: 11,
-          }),
-        ).toEqual({ ie: "11.0.0" });
-      },
-    );
-
-    itBabel7("can be intersected with the browsers option", () => {
+    it("returns browser supporting modules, intersect with browsers key, then combined with keyed browser overrides,", () => {
       expect(
         getTargets({
-          esmodules: "intersect",
-          browsers: ["chrome >= 70", "firefox >= 30"],
+          esmodules: true,
+          browsers: "ie 10",
+          ie: 11,
         }),
-      ).toEqual({ chrome: "70.0.0", firefox: baseESModulesTargets.firefox });
+      ).toEqual({ ie: "11.0.0" });
     });
 
-    itBabel8("can be intersected with the browsers option", () => {
+    it("can be intersected with the browsers option", () => {
       expect(
         getTargets({
           esmodules: true,
@@ -390,24 +311,6 @@ describe("getTargets", () => {
       ).toEqual({ chrome: "20.0.0", firefox: "70.0.0" });
     });
 
-    itBabel7(
-      "'intersect' behaves like 'true' if no browsers are specified - Babel 7",
-      () => {
-        expect(getTargets({ esmodules: "intersect" })).toEqual(
-          getTargets({ esmodules: true }, { ignoreBrowserslistConfig: true }),
-        );
-      },
-    );
-
-    itBabel7(
-      "'browsers' option will have no effect if it is an empty array - Babel 7",
-      () => {
-        expect(getTargets({ esmodules: "intersect", browsers: [] })).toEqual(
-          getTargets({ esmodules: "intersect" }),
-        );
-      },
-    );
-
     it("The final 'browsers' handled variable will have no effect if it is an empty array", () => {
       expect(getTargets({ esmodules: "intersect", browsers: [] })).toEqual(
         getTargets(
@@ -424,12 +327,9 @@ describe("getTargets", () => {
       ).toThrow();
     });
 
-    itBabel8(
-      "'intersect' behaves like no-op if no browsers are specified",
-      () => {
-        expect(getTargets({ esmodules: "intersect" })).toEqual(getTargets({}));
-      },
-    );
+    it("'intersect' behaves like no-op if no browsers are specified", () => {
+      expect(getTargets({ esmodules: "intersect" })).toEqual(getTargets({}));
+    });
 
     it("'intersect' behaves like 'true' if no browsers are specified and the browserslist config is ignored", () => {
       expect(
@@ -451,20 +351,13 @@ describe("getTargets", () => {
       ).toEqual(baseESModulesTargets);
     });
 
-    itBabel8(
-      "esmodules: true and ignoreBrowserslistConfig: true returns base esmodules targets",
-      () => {
-        expect(
-          getTargets({ esmodules: true }, { ignoreBrowserslistConfig: true }),
-        ).toEqual(baseESModulesTargets);
-      },
-    );
-
-    itBabel7("esmodules: true returns base esmodules targets", () => {
-      expect(getTargets({ esmodules: true })).toEqual(baseESModulesTargets);
+    it("esmodules: true and ignoreBrowserslistConfig: true returns base esmodules targets", () => {
+      expect(
+        getTargets({ esmodules: true }, { ignoreBrowserslistConfig: true }),
+      ).toEqual(baseESModulesTargets);
     });
 
-    itBabel8("esmodules: true returns default browserslist query", () => {
+    it("esmodules: true returns default browserslist query", () => {
       expect(getTargets({ esmodules: true })).toEqual(
         getTargets(
           { browsers: "defaults" },
@@ -502,11 +395,11 @@ describe("getTargets", () => {
 
   describe("exception", () => {
     it("throws when version is not a semver", () => {
-      expect(() =>
-        getTargets({ chrome: "seventy-two" }),
-      ).toThrowErrorMatchingInlineSnapshot(
-        `"@babel/helper-compilation-targets: 'seventy-two' is not a valid value for 'targets.chrome'."`,
-      );
+      expect(() => getTargets({ chrome: "seventy-two" }))
+        .toThrowErrorMatchingInlineSnapshot(`
+        "@babel/helper-compilation-targets: 'seventy-two' is not a valid value for 'targets.chrome'.
+        Cause: @babel/helper-compilation-targets: 'seventy-two' is not a valid version"
+      `);
     });
   });
 });

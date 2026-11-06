@@ -3,36 +3,29 @@
 
 import { types as t, template } from "@babel/core";
 
-if (!process.env.BABEL_8_BREAKING && !USE_ESM && !IS_STANDALONE) {
-  // eslint-disable-next-line no-restricted-globals
-  exports.getDynamicImportSource = function getDynamicImportSource(
-    node: t.CallExpression,
-  ): t.StringLiteral | t.TemplateLiteral {
-    const [source] = node.arguments;
-
-    return t.isStringLiteral(source) || t.isTemplateLiteral(source)
-      ? source
-      : (template.expression.ast`\`\${${source}}\`` as t.TemplateLiteral);
-  };
-}
-
 export function buildDynamicImport(
   node: t.CallExpression | t.ImportExpression,
   deferToThen: boolean,
   wrapWithPromise: boolean,
   builder: (specifier: t.Expression) => t.Expression,
 ): t.Expression {
-  const specifier = t.isCallExpression(node) ? node.arguments[0] : node.source;
+  const [specifier, options] = t.isCallExpression(node)
+    ? node.arguments
+    : [node.source, node.options];
 
   if (
     t.isStringLiteral(specifier) ||
     (t.isTemplateLiteral(specifier) && specifier.quasis.length === 0)
   ) {
-    if (deferToThen) {
-      return template.expression.ast`
-        Promise.resolve().then(() => ${builder(specifier)})
-      `;
-    } else return builder(specifier);
+    const result = deferToThen
+      ? template.expression.ast`
+          Promise.resolve().then(() => ${builder(specifier)})
+        `
+      : builder(specifier);
+    // The options are not used, but they must still be evaluated
+    return options
+      ? t.sequenceExpression([options as t.Expression, result])
+      : result;
   }
 
   const specifierToString = t.isTemplateLiteral(specifier)
@@ -42,22 +35,27 @@ export function buildDynamicImport(
         [t.identifier("specifier")],
       );
 
+  let call: t.CallExpression;
   if (deferToThen) {
-    return template.expression.ast`
+    call = template.expression.ast`
       (specifier =>
         new Promise(r => r(${specifierToString}))
           .then(s => ${builder(t.identifier("s"))})
       )(${specifier})
-    `;
+    ` as t.CallExpression;
   } else if (wrapWithPromise) {
-    return template.expression.ast`
+    call = template.expression.ast`
       (specifier =>
         new Promise(r => r(${builder(specifierToString)}))
       )(${specifier})
-    `;
+    ` as t.CallExpression;
   } else {
-    return template.expression.ast`
+    call = template.expression.ast`
       (specifier => ${builder(specifierToString)})(${specifier})
-    `;
+    ` as t.CallExpression;
   }
+  // The options are not used, but they must still be evaluated after the
+  // specifier
+  if (options) call.arguments.push(options);
+  return call;
 }

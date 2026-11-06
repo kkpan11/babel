@@ -20,7 +20,7 @@ export type CommentWhitespace = {
   /**
    * the containing comments
    */
-  comments: Array<Comment>;
+  comments: Comment[];
   /**
    * the immediately preceding AST node of the whitespace token
    */
@@ -40,11 +40,11 @@ export type CommentWhitespace = {
  * trailingComments. New comments will be placed before old comments
  * because the commentStack is enumerated reversely.
  */
-function setTrailingComments(node: Undone<Node>, comments: Array<Comment>) {
+function setTrailingComments(node: Undone<Node>, comments: Comment[]) {
   if (node.trailingComments === undefined) {
     node.trailingComments = comments;
   } else {
-    node.trailingComments.unshift(...comments);
+    node.trailingComments!.unshift(...comments);
   }
 }
 
@@ -53,11 +53,11 @@ function setTrailingComments(node: Undone<Node>, comments: Array<Comment>) {
  * leadingComments. New comments will be placed before old comments
  * because the commentStack is enumerated reversely.
  */
-function setLeadingComments(node: Undone<Node>, comments: Array<Comment>) {
+function setLeadingComments(node: Undone<Node>, comments: Comment[]) {
   if (node.leadingComments === undefined) {
     node.leadingComments = comments;
   } else {
-    node.leadingComments.unshift(...comments);
+    node.leadingComments!.unshift(...comments);
   }
 }
 
@@ -66,14 +66,11 @@ function setLeadingComments(node: Undone<Node>, comments: Array<Comment>) {
  * innerComments. New comments will be placed before old comments
  * because the commentStack is enumerated reversely.
  */
-export function setInnerComments(
-  node: Undone<Node>,
-  comments?: Array<Comment>,
-) {
+export function setInnerComments(node: Undone<Node>, comments: Comment[]) {
   if (node.innerComments === undefined) {
     node.innerComments = comments;
   } else {
-    node.innerComments.unshift(...comments);
+    node.innerComments!.unshift(...comments);
   }
 }
 
@@ -84,7 +81,7 @@ export function setInnerComments(
  */
 function adjustInnerComments(
   node: Undone<Node>,
-  elements: Array<Node>,
+  elements: (Node | null)[],
   commentWS: CommentWhitespace,
 ) {
   let lastElement = null;
@@ -92,7 +89,7 @@ function adjustInnerComments(
   while (lastElement === null && i > 0) {
     lastElement = elements[--i];
   }
-  if (lastElement === null || lastElement.start > commentWS.start) {
+  if (lastElement === null || lastElement.start! > commentWS.start) {
     setInnerComments(node, commentWS.comments);
   } else {
     setTrailingComments(lastElement, commentWS.comments);
@@ -101,7 +98,7 @@ function adjustInnerComments(
 
 export default class CommentsParser extends BaseParser {
   addComment(comment: Comment): void {
-    if (this.filename) comment.loc.filename = this.filename;
+    if (this.filename) comment.loc!.filename = this.filename;
     const { commentsLen } = this.state;
     if (this.comments.length !== commentsLen) {
       this.comments.length = commentsLen;
@@ -126,7 +123,7 @@ export default class CommentsParser extends BaseParser {
       i--;
     }
 
-    const { start: nodeStart } = node;
+    const nodeStart = node.start!;
     // invariant: for all 0 <= j <= i, let c = commentStack[j], c must satisfy c.end < node.end
     for (; i >= 0; i--) {
       const commentWS = commentStack[i];
@@ -166,7 +163,8 @@ export default class CommentsParser extends BaseParser {
       }
     } else {
       /*:: invariant(commentWS.containingNode !== null) */
-      const { containingNode: node, start: commentStart } = commentWS;
+      const node = commentWS.containingNode!;
+      const commentStart = commentWS.start;
       if (
         this.input.charCodeAt(this.offsetToSourcePos(commentStart) - 1) ===
         charCodes.comma
@@ -177,10 +175,10 @@ export default class CommentsParser extends BaseParser {
         switch (node.type) {
           case "ObjectExpression":
           case "ObjectPattern":
-          case "RecordExpression":
             adjustInnerComments(node, node.properties, commentWS);
             break;
           case "CallExpression":
+          case "NewExpression":
           case "OptionalCallExpression":
             adjustInnerComments(node, node.arguments, commentWS);
             break;
@@ -197,26 +195,27 @@ export default class CommentsParser extends BaseParser {
           case "ObjectMethod":
           case "ClassMethod":
           case "ClassPrivateMethod":
+          case "TSTypeParameterDeclaration":
             adjustInnerComments(node, node.params, commentWS);
             break;
           case "ArrayExpression":
           case "ArrayPattern":
-          case "TupleExpression":
             adjustInnerComments(node, node.elements, commentWS);
             break;
           case "ExportNamedDeclaration":
           case "ImportDeclaration":
             adjustInnerComments(node, node.specifiers, commentWS);
             break;
-          case "TSEnumDeclaration":
-            if (!process.env.BABEL_8_BREAKING) {
-              adjustInnerComments(node, node.members, commentWS);
-            } else {
-              setInnerComments(node, comments);
-            }
+          case "ImportNamespaceSpecifier":
+          case "ExportNamespaceSpecifier":
+            // import { x, y, } as ns from '...'
+            adjustInnerComments(node, node.exportsFilter ?? [], commentWS);
             break;
           case "TSEnumBody":
             adjustInnerComments(node, node.members, commentWS);
+            break;
+          case "TSInterfaceBody":
+            adjustInnerComments(node, node.body, commentWS);
             break;
           default: {
             setInnerComments(node, comments);
@@ -268,6 +267,18 @@ export default class CommentsParser extends BaseParser {
     const commentWS = commentStack[length - 1];
     if (commentWS.leadingNode === node) {
       commentWS.leadingNode = null;
+    }
+  }
+
+  /**
+   * Replace `oldNode` with `newNode` in the comment whitespaces that
+   * have not been finalized yet. This is used when an AST node is replaced by
+   * one of its children spanning the same range.
+   */
+  replaceNodeInPendingComments(oldNode: Node, newNode: Node) {
+    for (const commentWS of this.state.commentStack) {
+      if (commentWS.leadingNode === oldNode) commentWS.leadingNode = newNode;
+      if (commentWS.trailingNode === oldNode) commentWS.trailingNode = newNode;
     }
   }
 

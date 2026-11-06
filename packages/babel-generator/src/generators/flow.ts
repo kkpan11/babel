@@ -1,5 +1,9 @@
 import type Printer from "../printer.ts";
-import { isDeclareExportDeclaration, isStatement } from "@babel/types";
+import {
+  isDeclareExportDeclaration,
+  isExportNamespaceSpecifier,
+  isStatement,
+} from "@babel/types";
 import type * as t from "@babel/types";
 import { ExportAllDeclaration } from "./modules.ts";
 import { TokenContext } from "../node/index.ts";
@@ -43,7 +47,7 @@ export function DeclareClass(
   }
   this.word("class");
   this.space();
-  this._interfaceish(node);
+  _interfaceish.call(this, node);
 }
 
 export function DeclareFunction(
@@ -58,8 +62,9 @@ export function DeclareFunction(
   this.word("function");
   this.space();
   this.print(node.id);
-  // @ts-ignore(Babel 7 vs Babel 8) TODO(Babel 8) Remove this comment, since we'll remove the Noop node
-  this.print(node.id.typeAnnotation.typeAnnotation);
+
+  // Skip TypeAnnotation printing method as the FunctionTypeAnnotation will print `(): `
+  this.print(node.id.typeAnnotation?.typeAnnotation);
 
   if (node.predicate) {
     this.space();
@@ -85,7 +90,7 @@ export function DeclaredPredicate(this: Printer, node: t.DeclaredPredicate) {
 export function DeclareInterface(this: Printer, node: t.DeclareInterface) {
   this.word("declare");
   this.space();
-  this.InterfaceDeclaration(node);
+  InterfaceDeclaration.call(this, node);
 }
 
 export function DeclareModule(this: Printer, node: t.DeclareModule) {
@@ -113,7 +118,7 @@ export function DeclareModuleExports(
 export function DeclareTypeAlias(this: Printer, node: t.DeclareTypeAlias) {
   this.word("declare");
   this.space();
-  this.TypeAlias(node);
+  TypeAlias.call(this, node);
 }
 
 export function DeclareOpaqueType(
@@ -125,7 +130,7 @@ export function DeclareOpaqueType(
     this.word("declare");
     this.space();
   }
-  this.OpaqueType(node);
+  OpaqueType.call(this, node);
 }
 
 export function DeclareVariable(
@@ -273,13 +278,20 @@ function FlowExportDeclaration(
     this.print(declar);
     if (!isStatement(declar)) this.semicolon();
   } else {
-    this.token("{");
-    if (node.specifiers.length) {
-      this.space();
-      this.printList(node.specifiers);
-      this.space();
+    const specifiers = node.specifiers!;
+    if (specifiers.length === 1 && isExportNamespaceSpecifier(specifiers[0])) {
+      // declare export * as ns from "a";
+      // declare export { x } as ns from "a";
+      this.print(specifiers[0]);
+    } else {
+      this.token("{");
+      if (specifiers.length) {
+        this.space();
+        this.printList(specifiers);
+        this.space();
+      }
+      this.token("}");
     }
-    this.token("}");
 
     if (node.source) {
       this.space();
@@ -424,7 +436,7 @@ export function InterfaceDeclaration(
 ) {
   this.word("interface");
   this.space();
-  this._interfaceish(node);
+  _interfaceish.call(this, node);
 }
 
 function andSeparator(this: Printer, occurrenceCount: number) {
@@ -472,6 +484,7 @@ export function NullableTypeAnnotation(
 }
 
 export {
+  BigIntLiteral as BigIntLiteralTypeAnnotation,
   NumericLiteral as NumberLiteralTypeAnnotation,
   StringLiteral as StringLiteralTypeAnnotation,
 } from "./types.ts";
@@ -551,7 +564,7 @@ export function TypeParameterInstantiation(
 export { TypeParameterInstantiation as TypeParameterDeclaration };
 
 export function TypeParameter(this: Printer, node: t.TypeParameter) {
-  this._variance(node);
+  _variance.call(this, node);
 
   this.word(node.name);
 
@@ -619,17 +632,13 @@ export function ObjectTypeAnnotation(
       props,
       true,
       true,
-      undefined,
-      undefined,
-      function addNewlines(leading) {
-        if (leading && !props[0]) return 1;
-      },
       () => {
         if (props.length !== 1 || node.inexact) {
           this.token(",");
           this.space();
         }
       },
+      true,
     );
 
     this.space();
@@ -688,7 +697,7 @@ export function ObjectTypeIndexer(this: Printer, node: t.ObjectTypeIndexer) {
     this.word("static");
     this.space();
   }
-  this._variance(node);
+  _variance.call(this, node);
   this.token("[");
   if (node.id) {
     this.print(node.id);
@@ -715,7 +724,7 @@ export function ObjectTypeProperty(this: Printer, node: t.ObjectTypeProperty) {
     this.word(node.kind);
     this.space();
   }
-  this._variance(node);
+  _variance.call(this, node);
   this.print(node.key);
   if (node.optional) this.token("?");
   if (!node.method) {

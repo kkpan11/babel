@@ -3,7 +3,8 @@
 var _foo = _interopRequireDefault(require("foo"));
 var Bar = _interopRequireWildcard(require("bar"));
 var _baz = require("baz");
-function _interopRequireWildcard(e, t) { if ("function" == typeof WeakMap) var r = new WeakMap(), n = new WeakMap(); return (_interopRequireWildcard = function (e, t) { if (!t && e && e.__esModule) return e; var o, i, f = { __proto__: null, default: e }; if (null === e || "object" != typeof e && "function" != typeof e) return f; if (o = t ? n : r) { if (o.has(e)) return o.get(e); o.set(e, f); } for (const t in e) "default" !== t && {}.hasOwnProperty.call(e, t) && ((i = (o = Object.defineProperty) && Object.getOwnPropertyDescriptor(e, t)) && (i.get || i.set) ? o(f, t, i) : f[t] = e[t]); return f; })(e, t); }
+var e;
+function _interopRequireWildcard(t, r) { if (!r && t && t.__esModule) return t; var n, a, o = Object.defineProperty, f = { __proto__: null, default: t }; if (Object(t) !== t) return f; if (e || "function" != typeof WeakMap || (e = new WeakMap()), e) { if (e.has(t)) return e.get(t); e.set(t, f); } for (a in t) "default" !== a && {}.hasOwnProperty.call(t, a) && ((n = o && Object.getOwnPropertyDescriptor(t, a)) && (n.get || n.set) ? o(f, a, n) : f[a] = t[a]); return f; }
 function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e }; }
 _foo.default = (42, function () {
   throw new Error('"' + "Foo" + '" is read-only.');
