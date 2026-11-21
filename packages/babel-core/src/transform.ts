@@ -5,7 +5,10 @@ import type { InputOptions, ResolvedConfig } from "./config/index.ts";
 import { run } from "./transformation/index.ts";
 
 import type { FileResult, FileResultCallback } from "./transformation/index.ts";
-import { beginHiddenCallStack } from "./errors/rewrite-stack-trace.ts";
+import {
+  beginHiddenCallStack,
+  withStackTraceRewriting,
+} from "./errors/rewrite-stack-trace.ts";
 
 export type { FileResult } from "./transformation/index.ts";
 
@@ -16,18 +19,19 @@ type Transform = {
     opts: InputOptions | undefined | null,
     callback: FileResultCallback,
   ): void;
-  (code: string, opts?: InputOptions | null): FileResult | null;
 };
 
-const transformRunner = gensync(function* transform(
-  code: string,
-  opts?: InputOptions,
-): Handler<FileResult | null> {
-  const config: ResolvedConfig | null = yield* loadConfig(opts);
-  if (config === null) return null;
+const transformRunner = gensync(
+  withStackTraceRewriting(function* transform(
+    code: string,
+    opts?: InputOptions | null,
+  ): Handler<FileResult | null> {
+    const config: ResolvedConfig | null = yield* loadConfig(opts);
+    if (config === null) return null;
 
-  return yield* run(config, code);
-});
+    return yield* run(config, code);
+  }),
+);
 
 export const transform: Transform = function transform(
   code,
@@ -45,19 +49,13 @@ export const transform: Transform = function transform(
   }
 
   if (callback === undefined) {
-    if (process.env.BABEL_8_BREAKING) {
-      throw new Error(
-        "Starting from Babel 8.0.0, the 'transform' function expects a callback. If you need to call it synchronously, please use 'transformSync'.",
-      );
-    } else {
-      // console.warn(
-      //   "Starting from Babel 8.0.0, the 'transform' function will expect a callback. If you need to call it synchronously, please use 'transformSync'.",
-      // );
-      return beginHiddenCallStack(transformRunner.sync)(code, opts);
-    }
+    throw new Error(
+      "Starting from Babel 8.0.0, the 'transform' function expects a callback. If you need to call it synchronously, please use 'transformSync'.",
+    );
   }
 
   beginHiddenCallStack(transformRunner.errback)(code, opts, callback);
+  return null;
 };
 
 export function transformSync(

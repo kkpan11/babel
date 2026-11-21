@@ -1,37 +1,106 @@
+import {
+  classMethodOrPropertyUnionShapeCommon,
+  classMethodOrPropertyCommon,
+} from "./core.ts";
+import type * as t from "../index.ts";
 import defineType, {
   arrayOfType,
   assertNodeType,
+  assertNodeOrValueType,
   assertValueType,
+  chain,
   validateArrayOfType,
 } from "./utils.ts";
 
+// https://github.com/tc39/proposal-partial-application
 defineType("ArgumentPlaceholder", {});
 
+// https://github.com/tc39/proposal-bind-operator
 defineType("BindExpression", {
   visitor: ["object", "callee"],
   aliases: ["Expression"],
-  fields:
-    !process.env.BABEL_8_BREAKING && !process.env.BABEL_TYPES_8_BREAKING
-      ? {
-          object: {
-            validate: Object.assign(() => {}, {
-              oneOfNodeTypes: ["Expression"],
-            }),
-          },
-          callee: {
-            validate: Object.assign(() => {}, {
-              oneOfNodeTypes: ["Expression"],
-            }),
-          },
-        }
-      : {
-          object: {
-            validate: assertNodeType("Expression"),
-          },
-          callee: {
-            validate: assertNodeType("Expression"),
-          },
-        },
+  fields: {
+    object: {
+      validate: assertNodeOrValueType("null", "Expression"),
+    },
+    callee: {
+      validate: assertNodeType("Expression"),
+    },
+  },
+});
+
+// https://github.com/tc39/proposal-decorators
+defineType("ClassAccessorProperty", {
+  visitor: ["decorators", "key", "typeAnnotation", "value"],
+  builder: [
+    "key",
+    "value",
+    "typeAnnotation",
+    "decorators",
+    "computed",
+    "static",
+  ],
+  aliases: ["Property", "Accessor"],
+  ...classMethodOrPropertyUnionShapeCommon(true),
+  fields: {
+    ...classMethodOrPropertyCommon(),
+    key: {
+      validate: chain(
+        (function () {
+          const normal = assertNodeType(
+            "Identifier",
+            "StringLiteral",
+            "NumericLiteral",
+            "BigIntLiteral",
+            "PrivateName",
+          );
+          const computed = assertNodeType("Expression");
+
+          return function (node: t.ClassAccessorProperty, key, val) {
+            const validator = node.computed ? computed : normal;
+            validator(node, key, val);
+          };
+        })(),
+        assertNodeType(
+          "Identifier",
+          "StringLiteral",
+          "NumericLiteral",
+          "BigIntLiteral",
+          "Expression",
+          "PrivateName",
+        ),
+      ),
+    },
+    value: {
+      validate: assertNodeType("Expression"),
+      optional: true,
+    },
+    definite: {
+      validate: assertValueType("boolean"),
+      optional: true,
+    },
+    typeAnnotation: {
+      validate: assertNodeType("TypeAnnotation", "TSTypeAnnotation"),
+
+      optional: true,
+    },
+    decorators: {
+      validate: arrayOfType("Decorator"),
+      optional: true,
+    },
+    readonly: {
+      validate: assertValueType("boolean"),
+      optional: true,
+    },
+    declare: {
+      validate: assertValueType("boolean"),
+      optional: true,
+    },
+    variance: {
+      validate: assertNodeType("Variance"),
+      optional: true,
+    },
+  },
 });
 
 defineType("Decorator", {
@@ -43,6 +112,7 @@ defineType("Decorator", {
   },
 });
 
+// https://github.com/tc39/proposal-do-expressions
 defineType("DoExpression", {
   visitor: ["body"],
   builder: ["body", "async"],
@@ -58,6 +128,7 @@ defineType("DoExpression", {
   },
 });
 
+// https://github.com/tc39/proposal-export-default-from
 defineType("ExportDefaultSpecifier", {
   visitor: ["exported"],
   aliases: ["ModuleSpecifier"],
@@ -67,37 +138,6 @@ defineType("ExportDefaultSpecifier", {
     },
   },
 });
-
-defineType("RecordExpression", {
-  visitor: ["properties"],
-  aliases: ["Expression"],
-  fields: {
-    properties: validateArrayOfType("ObjectProperty", "SpreadElement"),
-  },
-});
-
-defineType("TupleExpression", {
-  fields: {
-    elements: {
-      validate: arrayOfType("Expression", "SpreadElement"),
-      default: [],
-    },
-  },
-  visitor: ["elements"],
-  aliases: ["Expression"],
-});
-
-if (!process.env.BABEL_8_BREAKING) {
-  defineType("DecimalLiteral", {
-    builder: ["value"],
-    fields: {
-      value: {
-        validate: assertValueType("string"),
-      },
-    },
-    aliases: ["Expression", "Pureish", "Literal", "Immutable"],
-  });
-}
 
 // https://github.com/tc39/proposal-js-module-blocks
 defineType("ModuleExpression", {
@@ -111,35 +151,46 @@ defineType("ModuleExpression", {
 });
 
 // https://github.com/tc39/proposal-pipeline-operator
-// https://github.com/js-choi/proposal-hack-pipes
 defineType("TopicReference", {
   aliases: ["Expression"],
 });
 
-// https://github.com/tc39/proposal-pipeline-operator
-// https://github.com/js-choi/proposal-smart-pipes
-defineType("PipelineTopicExpression", {
-  builder: ["expression"],
-  visitor: ["expression"],
+// https://github.com/tc39/proposal-discard-binding
+defineType("VoidPattern", {
+  aliases: ["Pattern", "PatternLike", "FunctionParameter"],
+});
+
+// https://github.com/tc39/proposal-structs
+defineType("StructDeclaration", {
+  visitor: ["id", "superClass", "body"],
+  aliases: ["Scopable", "Statement", "Declaration"],
   fields: {
-    expression: {
+    id: {
+      validate: assertNodeType("Identifier"),
+      // The id may be omitted if this is the child of an
+      // ExportDefaultDeclaration.
+      optional: true,
+    },
+    body: {
+      validate: assertNodeType("StructBody"),
+    },
+    superClass: {
+      optional: true,
       validate: assertNodeType("Expression"),
     },
   },
-  aliases: ["Expression"],
 });
 
-defineType("PipelineBareFunction", {
-  builder: ["callee"],
-  visitor: ["callee"],
+defineType("StructBody", {
+  visitor: ["body"],
   fields: {
-    callee: {
-      validate: assertNodeType("Expression"),
-    },
+    body: validateArrayOfType(
+      "ClassMethod",
+      "ClassPrivateMethod",
+      "ClassProperty",
+      "ClassPrivateProperty",
+      "StaticBlock",
+      "ClassAccessorProperty",
+    ),
   },
-  aliases: ["Expression"],
-});
-
-defineType("PipelinePrimaryTopicReference", {
-  aliases: ["Expression"],
 });

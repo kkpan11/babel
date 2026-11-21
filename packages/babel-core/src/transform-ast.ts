@@ -5,7 +5,10 @@ import type { InputOptions, ResolvedConfig } from "./config/index.ts";
 import { run } from "./transformation/index.ts";
 import type * as t from "@babel/types";
 
-import { beginHiddenCallStack } from "./errors/rewrite-stack-trace.ts";
+import {
+  beginHiddenCallStack,
+  withStackTraceRewriting,
+} from "./errors/rewrite-stack-trace.ts";
 
 import type { FileResult, FileResultCallback } from "./transformation/index.ts";
 type AstRoot = t.File | t.Program;
@@ -18,21 +21,22 @@ type TransformFromAst = {
     opts: InputOptions | undefined | null,
     callback: FileResultCallback,
   ): void;
-  (ast: AstRoot, code: string, opts?: InputOptions | null): FileResult | null;
 };
 
-const transformFromAstRunner = gensync(function* (
-  ast: AstRoot,
-  code: string,
-  opts: InputOptions | undefined | null,
-): Handler<FileResult | null> {
-  const config: ResolvedConfig | null = yield* loadConfig(opts);
-  if (config === null) return null;
+const transformFromAstRunner = gensync(
+  withStackTraceRewriting(function* (
+    ast: AstRoot,
+    code: string,
+    opts: InputOptions | undefined | null,
+  ): Handler<FileResult | null> {
+    const config: ResolvedConfig | null = yield* loadConfig(opts);
+    if (config === null) return null;
 
-  if (!ast) throw new Error("No AST given");
+    if (!ast) throw new Error("No AST given");
 
-  return yield* run(config, code, ast);
-});
+    return yield* run(config, code, ast);
+  }),
+);
 
 export const transformFromAst: TransformFromAst = function transformFromAst(
   ast,
@@ -51,16 +55,9 @@ export const transformFromAst: TransformFromAst = function transformFromAst(
   }
 
   if (callback === undefined) {
-    if (process.env.BABEL_8_BREAKING) {
-      throw new Error(
-        "Starting from Babel 8.0.0, the 'transformFromAst' function expects a callback. If you need to call it synchronously, please use 'transformFromAstSync'.",
-      );
-    } else {
-      // console.warn(
-      //   "Starting from Babel 8.0.0, the 'transformFromAst' function will expect a callback. If you need to call it synchronously, please use 'transformFromAstSync'.",
-      // );
-      return beginHiddenCallStack(transformFromAstRunner.sync)(ast, code, opts);
-    }
+    throw new Error(
+      "Starting from Babel 8.0.0, the 'transformFromAst' function expects a callback. If you need to call it synchronously, please use 'transformFromAstSync'.",
+    );
   }
 
   beginHiddenCallStack(transformFromAstRunner.errback)(
@@ -69,6 +66,7 @@ export const transformFromAst: TransformFromAst = function transformFromAst(
     opts,
     callback,
   );
+  return null;
 };
 
 export function transformFromAstSync(

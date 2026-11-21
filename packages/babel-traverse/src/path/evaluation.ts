@@ -13,8 +13,8 @@ const VALID_IDENTIFIER_CALLEES = [
   "decodeURIComponent",
   "encodeURI",
   "encodeURIComponent",
-  process.env.BABEL_8_BREAKING ? "btoa" : null,
-  process.env.BABEL_8_BREAKING ? "atob" : null,
+  "btoa",
+  "atob",
 ] as const;
 
 const INVALID_METHODS = ["random"] as const;
@@ -30,7 +30,7 @@ function isValidObjectCallee(
 
 function isValidIdentifierCallee(
   val: string,
-): val is (typeof VALID_IDENTIFIER_CALLEES)[number] {
+): val is NonNullable<(typeof VALID_IDENTIFIER_CALLEES)[number]> {
   return VALID_IDENTIFIER_CALLEES.includes(
     // @ts-expect-error val is a string
     val,
@@ -62,7 +62,7 @@ function isInvalidMethod(val: string): val is (typeof INVALID_METHODS)[number] {
  *
  */
 
-export function evaluateTruthy(this: NodePath): boolean {
+export function evaluateTruthy(this: NodePath): boolean | undefined {
   const res = this.evaluate();
   if (res.confident) return !!res.value;
 }
@@ -80,7 +80,7 @@ type Result = {
 /**
  * Deopts the evaluation
  */
-function deopt(path: NodePath, state: State) {
+function deopt(path: NodePath | null, state: State) {
   if (!state.confident) return;
   state.deoptPath = path;
   state.confident = false;
@@ -91,6 +91,63 @@ const Globals = new Map([
   ["Infinity", Infinity],
   ["NaN", NaN],
 ]);
+
+/**
+ * Whether the `var` declaration at `declaration` has always run by the time
+ * `reference` (which comes after it in the source) runs.
+ *
+ * Walks up from the declaration to the closest node that also contains the
+ * reference. Every step on the way must run its child unconditionally, in
+ * order: a statement in a block, a declarator in a declaration, or the `init`
+ * of a `for` statement. Anything else (`if`, loop bodies, `switch` cases,
+ * `try`, labeled statements, ...) may skip the declaration.
+ *
+ * Function boundaries need no special handling: a reference in a nested
+ * function only counts as safe if the function itself sits after the
+ * declaration in a block that is guaranteed to have run it.
+ */
+function isVarDeclarationReachedBefore(
+  declaration: NodePath,
+  reference: NodePath,
+): boolean {
+  // Ancestors that run the declaration unconditionally and in order. This is a
+  // contiguous chain starting from the declaration, usually just the
+  // declaration statement and the enclosing function body.
+  const sequentialAncestors = new Set<t.Node>();
+  for (
+    let child = declaration, parent = child.parentPath;
+    parent != null && isSequentialStep(child, parent);
+    child = parent, parent = child.parentPath
+  ) {
+    sequentialAncestors.add(parent.node);
+  }
+
+  // The first ancestor of the reference found in the chain is the closest
+  // common ancestor. If that one is not in the chain, no higher one is.
+  for (let p = reference.parentPath; p; p = p.parentPath) {
+    if (sequentialAncestors.has(p.node)) return true;
+  }
+  return false;
+}
+
+function isSequentialStep(child: NodePath, parent: NodePath): boolean {
+  const { listKey, key } = child;
+  return (
+    (listKey === "declarations" && parent.isVariableDeclaration()) ||
+    (listKey === "body" &&
+      (parent.isBlockStatement() ||
+        parent.isProgram() ||
+        parent.isStaticBlock() ||
+        parent.isTSModuleBlock())) ||
+    (listKey === "consequent" && parent.isSwitchCase()) ||
+    (key === "init" && parent.isForStatement()) ||
+    (key === "declaration" && parent.isExportNamedDeclaration()) ||
+    // `break` cannot target a label from inside a variable declaration
+    (key === "body" &&
+      parent.isLabeledStatement() &&
+      child.isVariableDeclaration())
+  );
+}
 
 /**
  * We wrap the _evaluate method so we can track `seen` nodes, we push an item
@@ -105,7 +162,7 @@ function evaluateCached(path: NodePath, state: State): any {
   const { seen } = state;
 
   if (seen.has(node)) {
-    const existing = seen.get(node);
+    const existing = seen.get(node)!;
     if (existing.resolved) {
       return existing.value;
     } else {
@@ -183,8 +240,15 @@ function _evaluate(path: NodePath, state: State): any {
     }
   }
 
-  if (path.isExpressionWrapper()) {
-    // TypeCastExpression, ExpressionStatement etc
+  if (
+    path.isExpressionWrapper() ||
+    path.isTSAsExpression() ||
+    path.isTSSatisfiesExpression() ||
+    path.isTSTypeAssertion() ||
+    path.isTSNonNullExpression() ||
+    path.isTSInstantiationExpression()
+  ) {
+    // Runtime-transparent expression wrappers such as type assertions.
     return evaluateCached(path.get("expression"), state);
   }
 
@@ -224,27 +288,18 @@ function _evaluate(path: NodePath, state: State): any {
     if (binding) {
       if (
         binding.constantViolations.length > 0 ||
+        // @ts-expect-error comparing undefined and number
         path.node.start < binding.path.node.end
       ) {
         deopt(binding.path, state);
         return;
       }
-      const bindingPathScope = binding.path.scope;
-      if (binding.kind === "var" && bindingPathScope !== binding.scope) {
-        let hasUnsafeBlock =
-          !bindingPathScope.path.parentPath.isBlockStatement();
-        for (let scope = bindingPathScope.parent; scope; scope = scope.parent) {
-          if (scope === path.scope) {
-            if (hasUnsafeBlock) {
-              deopt(binding.path, state);
-              return;
-            }
-            break;
-          }
-          if (scope.path.parentPath?.isBlockStatement()) {
-            hasUnsafeBlock = true;
-          }
-        }
+      if (
+        binding.kind === "var" &&
+        !isVarDeclarationReachedBefore(binding.path, path)
+      ) {
+        deopt(binding.path, state);
+        return;
       }
       if (binding.hasValue) {
         return binding.value;
@@ -260,14 +315,27 @@ function _evaluate(path: NodePath, state: State): any {
       return;
     }
 
-    const resolved = path.resolve();
-    if (resolved === path) {
+    if (!binding) {
       deopt(path, state);
       return;
     }
-    const value = evaluateCached(resolved, state);
+
+    const bindingPath = binding.path;
+    if (!bindingPath.isVariableDeclarator()) {
+      deopt(bindingPath, state);
+      return;
+    }
+    const idPath = bindingPath.get("id");
+    if (!idPath.isIdentifier()) {
+      deopt(idPath, state);
+      return;
+    }
+    const initPath = bindingPath.get("init");
+    // @ts-expect-error FIXME: evaluateCached does not accept NodePath<null>
+    const value = evaluateCached(initPath, state);
     if (typeof value === "object" && value !== null && binding.references > 1) {
-      deopt(resolved, state);
+      // @ts-expect-error FIXME: deopt does not accept NodePath<null>
+      deopt(initPath, state);
       return;
     }
     return value;
@@ -305,8 +373,9 @@ function _evaluate(path: NodePath, state: State): any {
 
   if (path.isArrayExpression()) {
     const arr = [];
-    const elems: Array<NodePath> = path.get("elements");
+    const elems = path.get("elements");
     for (const elem of elems) {
+      // @ts-expect-error FIXME: better types
       const elemValue = elem.evaluate();
 
       if (elemValue.confident) {
@@ -461,7 +530,8 @@ function _evaluate(path: NodePath, state: State): any {
         object.isIdentifier() &&
         property.isIdentifier() &&
         isValidObjectCallee(object.node.name) &&
-        !isInvalidMethod(property.node.name)
+        !isInvalidMethod(property.node.name) &&
+        !path.scope.getBinding(object.node.name)
       ) {
         context = global[object.node.name];
         const key = property.node.name;
@@ -495,16 +565,18 @@ function _evaluate(path: NodePath, state: State): any {
 
 function evaluateQuasis(
   path: NodePath<t.TaggedTemplateExpression | t.TemplateLiteral>,
-  quasis: Array<any>,
+  quasis: any[],
   state: State,
   raw = false,
 ) {
   let str = "";
 
   let i = 0;
-  const exprs: Array<NodePath<t.Node>> = path.isTemplateLiteral()
-    ? path.get("expressions")
-    : path.get("quasi.expressions");
+  const exprs = (
+    path.isTemplateLiteral()
+      ? path.get("expressions")
+      : path.get("quasi.expressions")
+  ) as NodePath<t.Expression>[];
 
   for (const elem of quasis) {
     // not confident, evaluated an expression we don't like
@@ -541,7 +613,7 @@ function evaluateQuasis(
 export function evaluate(this: NodePath): {
   confident: boolean;
   value: any;
-  deopt?: NodePath;
+  deopt: NodePath | null;
 } {
   const state: State = {
     confident: true,

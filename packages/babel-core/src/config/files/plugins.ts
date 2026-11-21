@@ -2,20 +2,20 @@
  * This file handles all logic for converting string-based configuration references into loaded objects.
  */
 
-import buildDebug from "debug";
+import { createDebug } from "obug";
 import path from "node:path";
 import type { Handler } from "gensync";
 import { isAsync } from "../../gensync-utils/async.ts";
-import loadCodeDefault, { supportsESM } from "./module-types.ts";
+import loadCodeDefault from "./module-types.ts";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { resolve as importMetaResolve } from "../../vendor/import-meta-resolve.js";
+import { resolve as importMetaResolve } from "import-meta-resolve";
 
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 const require = createRequire(import.meta.url);
 
-const debug = buildDebug("babel:config:loading:files:plugins");
+const debug = createDebug("babel:config:loading:files:plugins");
 
 const EXACT_RE = /^module:/;
 const BABEL_PLUGIN_PREFIX_RE = /^(?!@|module:|[^/]+\/|babel-plugin-)/;
@@ -86,7 +86,8 @@ function standardizeName(type: "plugin" | "preset", name: string) {
   );
 }
 
-type Result<T> = { error: Error; value: null } | { error: null; value: T };
+type Result<T> =
+  { error: NodeJS.ErrnoException; value: null } | { error: null; value: T };
 
 function* resolveAlternativesHelper(
   type: "plugin" | "preset",
@@ -96,7 +97,6 @@ function* resolveAlternativesHelper(
   const { error, value } = yield standardizedName;
   if (!error) return value;
 
-  // @ts-expect-error code may not index error
   if (error.code !== "MODULE_NOT_FOUND") throw error;
 
   if (standardizedName !== name && !(yield name).error) {
@@ -142,7 +142,7 @@ function tryRequireResolve(
       return { error: null, value: require.resolve(id) };
     }
   } catch (error) {
-    return { error, value: null };
+    return { error, value: null } as Result<string>;
   }
 }
 
@@ -153,7 +153,7 @@ function tryImportMetaResolve(
   try {
     return { error: null, value: importMetaResolve(id, options) };
   } catch (error) {
-    return { error, value: null };
+    return { error, value: null } as Result<string>;
   }
 }
 
@@ -192,7 +192,7 @@ function resolveStandardizedName(
   dirname: string,
   allowAsync: boolean,
 ) {
-  if (!supportsESM || !allowAsync) {
+  if (!allowAsync) {
     return resolveStandardizedNameForRequire(type, name, dirname);
   }
 
@@ -210,70 +210,31 @@ function resolveStandardizedName(
     try {
       return resolveStandardizedNameForRequire(type, name, dirname);
     } catch (e2) {
-      if (e.type === "MODULE_NOT_FOUND") throw e;
-      if (e2.type === "MODULE_NOT_FOUND") throw e2;
+      if ((e as { type?: string }).type === "MODULE_NOT_FOUND") throw e;
+      if ((e2 as { type?: string }).type === "MODULE_NOT_FOUND") throw e2;
       throw e;
     }
   }
 }
 
-if (!process.env.BABEL_8_BREAKING) {
-  // eslint-disable-next-line no-var
-  var LOADING_MODULES = new Set();
-}
 function* requireModule(
   type: string,
   loader: "require" | "auto",
   name: string,
 ): Handler<unknown> {
-  if (!process.env.BABEL_8_BREAKING) {
-    if (!(yield* isAsync()) && LOADING_MODULES.has(name)) {
-      throw new Error(
-        `Reentrant ${type} detected trying to load "${name}". This module is not ignored ` +
-          "and is trying to load itself while compiling itself, leading to a dependency cycle. " +
-          'We recommend adding it to your "ignore" list in your babelrc, or to a .babelignore.',
-      );
-    }
-  }
-
   try {
-    if (!process.env.BABEL_8_BREAKING) {
-      LOADING_MODULES.add(name);
-    }
-
-    if (process.env.BABEL_8_BREAKING) {
-      return yield* loadCodeDefault(
-        name,
-        loader,
-        `You appear to be using a native ECMAScript module ${type}, ` +
-          "which is only supported when running Babel asynchronously " +
-          "or when using the Node.js `--experimental-require-module` flag.",
-        `You appear to be using a ${type} that contains top-level await, ` +
-          "which is only supported when running Babel asynchronously.",
-      );
-    } else {
-      return yield* loadCodeDefault(
-        name,
-        loader,
-        `You appear to be using a native ECMAScript module ${type}, ` +
-          "which is only supported when running Babel asynchronously " +
-          "or when using the Node.js `--experimental-require-module` flag.",
-        `You appear to be using a ${type} that contains top-level await, ` +
-          "which is only supported when running Babel asynchronously.",
-        // For backward compatibility, we need to support malformed presets
-        // defined as separate named exports rather than a single default
-        // export.
-        // See packages/babel-core/test/fixtures/option-manager/presets/es2015_named.js
-        // @ts-ignore(Babel 7 vs Babel 8) This param has been removed
-        true,
-      );
-    }
+    return yield* loadCodeDefault(
+      name,
+      loader,
+      `You appear to be using a native ECMAScript module ${type}, ` +
+        "which is only supported when running Babel asynchronously " +
+        "or when using the Node.js `--experimental-require-module` flag.",
+      `You appear to be using a ${type} that contains top-level await, ` +
+        "which is only supported when running Babel asynchronously.",
+    );
   } catch (err) {
-    err.message = `[BABEL]: ${err.message} (While processing: ${name})`;
+    (err as Error).message =
+      `[BABEL]: ${(err as Error).message} (While processing: ${name})`;
     throw err;
-  } finally {
-    if (!process.env.BABEL_8_BREAKING) {
-      LOADING_MODULES.delete(name);
-    }
   }
 }

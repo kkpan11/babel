@@ -3,9 +3,11 @@ import gensync, { type Handler } from "gensync";
 import loadConfig, { type InputOptions } from "./config/index.ts";
 import parser, { type ParseResult } from "./parser/index.ts";
 import normalizeOptions from "./transformation/normalize-opts.ts";
-import type { ValidatedOptions } from "./config/validation/options.ts";
 
-import { beginHiddenCallStack } from "./errors/rewrite-stack-trace.ts";
+import {
+  beginHiddenCallStack,
+  withStackTraceRewriting,
+} from "./errors/rewrite-stack-trace.ts";
 
 type FileParseCallback = {
   (err: Error, ast: null): void;
@@ -19,21 +21,22 @@ type Parse = {
     opts: InputOptions | undefined | null,
     callback: FileParseCallback,
   ): void;
-  (code: string, opts?: InputOptions | null): ParseResult | null;
 };
 
-const parseRunner = gensync(function* parse(
-  code: string,
-  opts: InputOptions | undefined | null,
-): Handler<ParseResult | null> {
-  const config = yield* loadConfig(opts);
+const parseRunner = gensync(
+  withStackTraceRewriting(function* parse(
+    code: string,
+    opts: InputOptions | undefined | null,
+  ): Handler<ParseResult | null> {
+    const config = yield* loadConfig(opts);
 
-  if (config === null) {
-    return null;
-  }
+    if (config === null) {
+      return null;
+    }
 
-  return yield* parser(config.passes, normalizeOptions(config), code);
-});
+    return yield* parser(config.passes, normalizeOptions(config), code);
+  }),
+);
 
 export const parse: Parse = function parse(
   code,
@@ -42,23 +45,17 @@ export const parse: Parse = function parse(
 ) {
   if (typeof opts === "function") {
     callback = opts;
-    opts = undefined as ValidatedOptions;
+    opts = undefined;
   }
 
   if (callback === undefined) {
-    if (process.env.BABEL_8_BREAKING) {
-      throw new Error(
-        "Starting from Babel 8.0.0, the 'parse' function expects a callback. If you need to call it synchronously, please use 'parseSync'.",
-      );
-    } else {
-      // console.warn(
-      //   "Starting from Babel 8.0.0, the 'parse' function will expect a callback. If you need to call it synchronously, please use 'parseSync'.",
-      // );
-      return beginHiddenCallStack(parseRunner.sync)(code, opts);
-    }
+    throw new Error(
+      "Starting from Babel 8.0.0, the 'parse' function expects a callback. If you need to call it synchronously, please use 'parseSync'.",
+    );
   }
 
   beginHiddenCallStack(parseRunner.errback)(code, opts, callback);
+  return null;
 };
 
 export function parseSync(...args: Parameters<typeof parseRunner.sync>) {

@@ -1,4 +1,5 @@
-import * as util from "./util.ts";
+import type { NodePath } from "@babel/core";
+import { types as t } from "@babel/core";
 
 // this function converts a shorthand object generator method into a normal
 // (non-shorthand) object property which is a generator function expression. for
@@ -28,9 +29,7 @@ import * as util from "./util.ts";
 //
 // If this function is called with an AST node path that is not a Function (or with an
 // argument that isn't an AST node path), it will throw an error.
-export default function replaceShorthandObjectMethod(path: any) {
-  const t = util.getTypes();
-
+export default function replaceShorthandObjectMethod(path: NodePath): NodePath {
   if (!path.node || !t.isFunction(path.node)) {
     throw new Error(
       "replaceShorthandObjectMethod can only be called on Function AST node paths.",
@@ -49,30 +48,29 @@ export default function replaceShorthandObjectMethod(path: any) {
   }
 
   const parameters = path.node.params.map(function (param: any) {
-    return t.cloneDeep(param);
+    return t.cloneNode(param);
   });
 
   const functionExpression = t.functionExpression(
     null, // id
     parameters, // params
-    t.cloneDeep(path.node.body), // body
+    t.cloneNode(path.node.body), // body
     path.node.generator,
     path.node.async,
-  );
-
-  util.replaceWithOrRemove(
-    path,
-    t.objectProperty(
-      t.cloneDeep(path.node.key), // key
-      functionExpression, //value
-      path.node.computed, // computed
-      false, // shorthand
-    ),
   );
 
   // path now refers to the ObjectProperty AST node path, but we want to return a
   // Function AST node path for the function expression we created. we know that
   // the FunctionExpression we just created is the value of the ObjectProperty,
   // so return the "value" path off of this path.
-  return path.get("value");
+  return path
+    .replaceWith(
+      t.objectProperty(
+        t.cloneNode(path.node.key), // key
+        functionExpression, //value
+        path.node.computed, // computed
+        false, // shorthand
+      ),
+    )[0]
+    .get("value");
 }

@@ -1,6 +1,7 @@
 import * as helpers from "@babel/helpers";
 import generator from "@babel/generator";
 import template from "@babel/template";
+import traverse from "@babel/traverse";
 import {
   arrayExpression,
   assignmentExpression,
@@ -12,6 +13,7 @@ import {
   exportNamedDeclaration,
   exportSpecifier,
   expressionStatement,
+  file,
   functionExpression,
   identifier,
   memberExpression,
@@ -42,7 +44,7 @@ const buildUmdWrapper = (replacements: Replacements) =>
     });
   `(replacements);
 
-function buildGlobal(allowlist?: Array<string>) {
+function buildGlobal(allowlist?: string[]) {
   const namespace = identifier("babelHelpers");
 
   const body: t.Statement[] = [];
@@ -86,7 +88,7 @@ function buildGlobal(allowlist?: Array<string>) {
   return tree;
 }
 
-function buildModule(allowlist?: Array<string>) {
+function buildModule(allowlist?: string[]) {
   const body: t.Statement[] = [];
   const refs = buildHelpers(body, null, allowlist);
 
@@ -102,7 +104,7 @@ function buildModule(allowlist?: Array<string>) {
   return program(body, [], "module");
 }
 
-function buildUmd(allowlist?: Array<string>) {
+function buildUmd(allowlist?: string[]) {
   const namespace = identifier("babelHelpers");
 
   const body: t.Statement[] = [];
@@ -130,7 +132,7 @@ function buildUmd(allowlist?: Array<string>) {
   ]);
 }
 
-function buildVar(allowlist?: Array<string>) {
+function buildVar(allowlist?: string[]) {
   const namespace = identifier("babelHelpers");
 
   const body: t.Statement[] = [];
@@ -148,18 +150,18 @@ function buildVar(allowlist?: Array<string>) {
 function buildHelpers(
   body: t.Statement[],
   namespace: t.Expression,
-  allowlist?: Array<string>,
+  allowlist?: string[],
 ): Record<string, t.MemberExpression>;
 function buildHelpers(
   body: t.Statement[],
   namespace: null,
-  allowlist?: Array<string>,
+  allowlist?: string[],
 ): Record<string, t.Identifier>;
 
 function buildHelpers(
   body: t.Statement[],
   namespace: t.Expression | null,
-  allowlist?: Array<string>,
+  allowlist?: string[],
 ) {
   const getHelperReference = (name: string) => {
     return namespace
@@ -167,16 +169,26 @@ function buildHelpers(
       : identifier(`_${name}`);
   };
 
-  const refs: { [key: string]: t.Identifier | t.MemberExpression } = {};
-  helpers.list.forEach(function (name) {
-    if (allowlist && !allowlist.includes(name)) return;
+  const names = helpers.list.filter(
+    name => !allowlist || allowlist.includes(name),
+  );
 
+  const declaredTopLevel = new Set(
+    namespace
+      ? []
+      : // Reserve the names that we'll use for the main helper functions
+        names.map(name => `_${name}`),
+  );
+
+  const refs: Record<string, t.Identifier | t.MemberExpression> = {};
+  names.forEach(function (name) {
     const ref = (refs[name] = getHelperReference(name));
+    const bindingName = namespace ? undefined : `_${name}`;
 
     const { nodes } = helpers.get(
       name,
       getHelperReference,
-      namespace ? null : `_${name}`,
+      bindingName,
       [],
       namespace
         ? (ast, exportName, mapExportBindingAssignments) => {
@@ -189,15 +201,39 @@ function buildHelpers(
               ),
             );
           }
-        : null,
+        : undefined,
     );
+
+    renameConflictingBindings(nodes, declaredTopLevel, bindingName);
 
     body.push(...nodes);
   });
   return refs;
 }
+
+// Avoid conflicts by renaming top-level variables already declared by
+// previous helpers
+function renameConflictingBindings(
+  nodes: t.Statement[],
+  declared: Set<string>,
+  exportName: string | undefined,
+) {
+  traverse(file(program(nodes)), {
+    Program(path) {
+      for (const name of Object.keys(path.scope.bindings)) {
+        if (name === exportName) continue;
+
+        let newName = name;
+        while (declared.has(newName)) newName = path.scope.generateUid(name);
+        if (newName !== name) path.scope.rename(name, newName);
+        declared.add(newName);
+      }
+      path.stop();
+    },
+  });
+}
 export default function (
-  allowlist?: Array<string>,
+  allowlist?: string[],
   outputType: "global" | "module" | "umd" | "var" = "global",
 ) {
   let tree: t.Program;

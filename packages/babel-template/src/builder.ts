@@ -19,14 +19,14 @@ export type TemplateBuilder<T> = {
   // Building from a template literal produces an AST builder function by default.
   (
     tpl: TemplateStringsArray,
-    ...args: Array<unknown>
+    ...args: unknown[]
   ): (replacements?: PublicReplacements) => T;
 
   // Allow users to explicitly create templates that produce ASTs, skipping
   // the need for an intermediate function.
   ast: {
     (tpl: string, opts?: PublicOpts): T;
-    (tpl: TemplateStringsArray, ...args: Array<unknown>): T;
+    (tpl: TemplateStringsArray, ...args: unknown[]): T;
   };
 };
 
@@ -71,7 +71,7 @@ export default function createTemplateBuilder<T>(
       throw new Error(`Unexpected template param ${typeof tpl}`);
     }) as TemplateBuilder<T>,
     {
-      ast: (tpl: string | Array<string>, ...args: Array<unknown>) => {
+      ast: (tpl: string | string[], ...args: unknown[]) => {
         if (typeof tpl === "string") {
           if (args.length > 1) throw new Error("Unexpected extra params.");
           return stringTemplate(
@@ -102,28 +102,39 @@ function extendedTrace<Arg, Result>(
   fn: (_: Arg) => Result,
 ): (_: Arg) => Result {
   // Since we lazy parse the template, we get the current stack so we have the
-  // original stack to append if it errors when parsing
-  let rootStack = "";
+  // original stack to append if it errors when parsing.
+  // The stack is formatted right away: until then, V8 keeps the raw call
+  // sites so a long-lived builder would keep its caller and the caller's realm
+  // alive. A custom `Error.prepareStackTrace` may return a non-string or throw,
+  // in which case we skip the origin stack rather than failing.
+  let rootStack: string | undefined;
   try {
-    // error stack gets populated in IE only on throw
-    // (https://msdn.microsoft.com/en-us/library/hh699850(v=vs.94).aspx)
-    throw new Error();
-  } catch (error) {
-    if (error.stack) {
-      // error.stack does not exists in IE <= 9
-      // We slice off the top 3 items in the stack to remove the call to
-      // 'extendedTrace', and the anonymous builder function, with the final
-      // stripped line being the error message itself since we threw it
-      // in the first place and it doesn't matter.
-      rootStack = error.stack.split("\n").slice(3).join("\n");
-    }
+    const { stack } = new Error();
+    if (typeof stack === "string") rootStack = stack;
+  } catch {
+    // ignore
   }
 
   return (arg: Arg) => {
     try {
       return fn(arg);
     } catch (err) {
-      err.stack += `\n    =============\n${rootStack}`;
+      if (rootStack !== undefined) {
+        // `Error.prepareStackTrace` may have changed since the builder was
+        // created, so the error's own stack may also be a non-string or throw.
+        try {
+          const error = err as Error;
+          if (typeof error.stack === "string") {
+            // We slice off the top 3 items in the stack to remove the call to
+            // 'extendedTrace', and the anonymous builder function, with the
+            // final stripped line being the error message itself since we
+            // threw it in the first place and it doesn't matter.
+            error.stack += `\n    =============\n${rootStack.split("\n").slice(3).join("\n")}`;
+          }
+        } catch {
+          // ignore
+        }
+      }
       throw err;
     }
   };

@@ -2,14 +2,11 @@ import { declare } from "@babel/helper-plugin-utils";
 import { types as t } from "@babel/core";
 
 export default declare(api => {
-  api.assertVersion(REQUIRED_VERSION(7));
+  api.assertVersion(REQUIRED_VERSION("^7.0.0-0 || ^8.0.0"));
 
   return {
     name: "transform-export-namespace-from",
-    manipulateOptions: process.env.BABEL_8_BREAKING
-      ? undefined
-      : (_, parser) => parser.plugins.push("exportNamespaceFrom"),
-
+    manipulateOptions: undefined,
     visitor: {
       ExportNamedDeclaration(path) {
         const { node, scope } = path;
@@ -18,15 +15,31 @@ export default declare(api => {
         const index = t.isExportDefaultSpecifier(specifiers[0]) ? 1 : 0;
         if (!t.isExportNamespaceSpecifier(specifiers[index])) return;
 
+        if (node.phase === "defer") {
+          throw path.buildCodeFrameError(
+            "Transforming `export defer ... from '...'` is not supported yet.",
+          );
+        }
+        if (specifiers[index].exportsFilter) {
+          throw path.buildCodeFrameError(
+            "Transforming `export { x, y } as ns from '...'` is not supported yet.",
+          );
+        }
+
         const nodes = [];
 
         if (index === 1) {
           nodes.push(
-            t.exportNamedDeclaration(null, [specifiers.shift()], node.source),
+            t.exportNamedDeclaration(
+              null,
+              [specifiers.shift()!],
+              t.cloneNode(node.source!),
+              node.attributes,
+            ),
           );
         }
 
-        const specifier = specifiers.shift();
+        const specifier = specifiers.shift()!;
         const { exported } = specifier;
         const uid = scope.generateUidIdentifier(
           // @ts-expect-error Identifier ?? StringLiteral
@@ -36,7 +49,8 @@ export default declare(api => {
         nodes.push(
           t.importDeclaration(
             [t.importNamespaceSpecifier(uid)],
-            t.cloneNode(node.source),
+            t.cloneNode(node.source!),
+            node.attributes?.map(attr => t.cloneNode(attr)),
           ),
           t.exportNamedDeclaration(null, [
             t.exportSpecifier(t.cloneNode(uid), exported),
@@ -48,7 +62,7 @@ export default declare(api => {
         }
 
         const [importDeclaration] = path.replaceWithMultiple(nodes);
-        path.scope.registerDeclaration(importDeclaration);
+        scope.registerDeclaration(importDeclaration);
       },
     },
   };

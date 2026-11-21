@@ -1,9 +1,9 @@
 import * as t from "@babel/types";
+import { setFlagsFromString } from "node:v8";
+import { createContext, runInContext, runInNewContext } from "node:vm";
 
-import _generator from "../../babel-generator/lib/index.js";
-import _template from "../lib/index.js";
-const generator = _generator.default || _generator;
-const template = _template.default || _template;
+import generator from "../../babel-generator/lib/index.js";
+import template from "../lib/index.js";
 
 const comments = "// Sum two numbers\nconst add = (a, b) => a + b;";
 
@@ -40,10 +40,10 @@ describe("@babel/template", function () {
 
   it("should allow yield outside generator function by default", function () {
     expect(template.ast("yield 1")).toMatchInlineSnapshot(`
-      Object {
-        "expression": Object {
-          "argument": Object {
-            "extra": Object {
+      {
+        "expression": {
+          "argument": {
+            "extra": {
               "raw": "1",
               "rawValue": 1,
             },
@@ -121,13 +121,34 @@ describe("@babel/template", function () {
       expect(result[1].expression).toEqual(id);
     });
 
-    it("should allow passing in a whitelist of replacement names", () => {
+    it("should allow passing in an allowlist of replacement names", () => {
       const id = t.identifier("someIdent");
       const result = template(
         `
           some_id;
         `,
-        { placeholderWhitelist: new Set(["some_id"]) },
+        { placeholderAllowlist: new Set(["some_id"]) },
+      )({ some_id: id });
+
+      expect(result.type).toBe("ExpressionStatement");
+      expect(result.expression).toBe(id);
+    });
+    it("should throw when using deprecated placeholderWhitelist without placeholderAllowlist", () => {
+      expect(() => {
+        template("FOO;", { placeholderWhitelist: new Set(["FOO"]) });
+      }).toThrow(/placeholderWhitelist.*renamed.*placeholderAllowlist/);
+    });
+
+    it("should not throw when both placeholderWhitelist and placeholderAllowlist are provided", () => {
+      const id = t.identifier("someIdent");
+      const result = template(
+        `
+          some_id;
+        `,
+        {
+          placeholderWhitelist: new Set(["some_id"]),
+          placeholderAllowlist: new Set(["some_id"]),
+        },
       )({ some_id: id });
 
       expect(result.type).toBe("ExpressionStatement");
@@ -176,7 +197,7 @@ describe("@babel/template", function () {
       }).toThrow(
         `Error: No substitution given for "ANOTHER_ID". If this is not meant to be a
             placeholder you may want to consider passing one of the following options to @babel/template:
-            - { placeholderPattern: false, placeholderWhitelist: new Set(['ANOTHER_ID'])}
+            - { placeholderPattern: false, placeholderAllowlist: new Set(['ANOTHER_ID'])}
             - { placeholderPattern: /^ANOTHER_ID$/ }`,
       );
     });
@@ -314,20 +335,20 @@ describe("@babel/template", function () {
         $$$$BABEL_TPL$0;
       `;
       expect(result).toMatchInlineSnapshot(`
-        Array [
-          Object {
-            "attributes": Array [],
+        [
+          {
+            "attributes": [],
             "declaration": null,
             "loc": undefined,
             "source": null,
-            "specifiers": Array [
-              Object {
-                "exported": Object {
+            "specifiers": [
+              {
+                "exported": {
                   "name": "x",
                   "type": "Identifier",
                 },
                 "loc": undefined,
-                "local": Object {
+                "local": {
                   "name": "x",
                   "type": "Identifier",
                 },
@@ -336,8 +357,8 @@ describe("@babel/template", function () {
             ],
             "type": "ExportNamedDeclaration",
           },
-          Object {
-            "expression": Object {
+          {
+            "expression": {
               "loc": undefined,
               "name": "$$$$BABEL_TPL$0",
               "type": "Identifier",
@@ -365,6 +386,131 @@ describe("@babel/template", function () {
           $$$$BABEL_TPL$0;
         }"
       `);
+    });
+  });
+
+  it("error stack", () => {
+    let error;
+    try {
+      function create() {
+        return template(``);
+      }
+      function call(tpl) {
+        tpl({
+          FOO: t.numericLiteral(1),
+        });
+      }
+      call(create());
+    } catch (e) {
+      error = e;
+    }
+    expect(error.stack).toMatch("=============\n    at create");
+  });
+
+  describe("builders do not retain their caller", () => {
+    let gc;
+    beforeAll(() => {
+      setFlagsFromString("--expose-gc");
+      try {
+        gc = runInNewContext("gc");
+      } finally {
+        // Do not expose `gc` to contexts created by later test files.
+        setFlagsFromString("--no-expose-gc");
+      }
+    });
+
+    async function expectNotRetained(build) {
+      function create() {
+        const context = createContext({ template });
+        const receiver = runInContext(`({ build: ${build} })`, context);
+        return { ref: new WeakRef(receiver), builder: receiver.build() };
+      }
+
+      const { ref, builder } = create();
+      // WeakRef targets are kept alive until the end of the current job.
+      for (let i = 0; i < 10 && ref.deref() !== undefined; i++) {
+        await new Promise(resolve => setImmediate(resolve));
+        gc();
+      }
+      expect(ref.deref()).toBeUndefined();
+      expect(builder().type).toBe("VariableDeclaration");
+    }
+
+    it("string templates", async () => {
+      await expectNotRetained(
+        `function () { return template.statement("const result = 1;"); }`,
+      );
+    });
+
+    it("tagged templates", async () => {
+      await expectNotRetained(
+        "function () { return template.statement`const result = 1;`; }",
+      );
+    });
+  });
+
+  describe("custom Error.prepareStackTrace", () => {
+    let prepareStackTrace;
+    beforeEach(() => {
+      prepareStackTrace = Error.prepareStackTrace;
+    });
+    afterEach(() => {
+      Error.prepareStackTrace = prepareStackTrace;
+    });
+
+    it("returning call sites does not hide template errors", () => {
+      Error.prepareStackTrace = (_, callSites) => callSites;
+      const build = template.statement("const = ;");
+      expect(() => build()).toThrow(SyntaxError);
+    });
+
+    it("throwing does not break template construction", () => {
+      Error.prepareStackTrace = () => {
+        throw new Error("prepareStackTrace");
+      };
+      const build = template.statement("const result = 1;");
+      expect(build().type).toBe("VariableDeclaration");
+    });
+
+    // `expect` itself reads stacks, so restore `Error.prepareStackTrace`
+    // before asserting.
+    function catchWithThrowingPrepareStackTrace(fn) {
+      Error.prepareStackTrace = () => {
+        throw new Error("prepareStackTrace");
+      };
+      try {
+        fn();
+      } catch (e) {
+        return e;
+      } finally {
+        Error.prepareStackTrace = prepareStackTrace;
+      }
+    }
+
+    it("throwing does not hide template errors", () => {
+      const error = catchWithThrowingPrepareStackTrace(() => {
+        template.statement("const = ;")();
+      });
+      expect(error).toBeInstanceOf(SyntaxError);
+    });
+
+    it("throwing after the builder is created does not hide template errors", () => {
+      const build = template.statement("const = ;");
+      const error = catchWithThrowingPrepareStackTrace(build);
+      expect(error).toBeInstanceOf(SyntaxError);
+    });
+
+    it("returning call sites after the builder is created keeps them", () => {
+      const build = template.statement("const = ;");
+      Error.prepareStackTrace = (_, callSites) => callSites;
+      let error;
+      try {
+        build();
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(SyntaxError);
+      expect(Array.isArray(error.stack)).toBe(true);
     });
   });
 
@@ -398,11 +544,11 @@ describe("@babel/template", function () {
       }).toThrow(/aren't compatible with '.syntacticPlaceholders: true'/);
     });
 
-    it("whitelist", () => {
+    it("allowlist", () => {
       expect(() => {
         template(`%%A%% + %%B%%`, {
           placeholderPattern: false,
-          placeholderWhitelist: new Set(["B"]),
+          placeholderAllowlist: new Set(["B"]),
         })();
       }).toThrow(/aren't compatible with '.syntacticPlaceholders: true'/);
     });
@@ -505,8 +651,8 @@ describe("@babel/template", function () {
 
     it("works in const declaration inside for-of without init", () => {
       const output = template("for (const %%LHS%% of %%RHS%%){}")({
-        LHS: t.ObjectPattern([
-          t.ObjectProperty(t.identifier("x"), t.identifier("x")),
+        LHS: t.objectPattern([
+          t.objectProperty(t.identifier("x"), t.identifier("x")),
         ]),
         RHS: t.identifier("y"),
       });
@@ -555,7 +701,7 @@ describe("@babel/template", function () {
       ];
 
       expect(outputs.map(ast => generator(ast).code)).toMatchInlineSnapshot(`
-        Array [
+        [
           "const greeting: string = 'Hello';",
           "var {}: string = x;",
           "class X {
@@ -586,7 +732,7 @@ describe("@babel/template", function () {
       ];
 
       expect(outputs.map(ast => generator(ast).code)).toMatchInlineSnapshot(`
-        Array [
+        [
           "const x: string = 'Hello';",
           "var {}: string = x;",
         ]

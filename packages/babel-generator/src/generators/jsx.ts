@@ -80,18 +80,10 @@ function spaceSeparator(this: Printer) {
 }
 
 export function JSXOpeningElement(this: Printer, node: t.JSXOpeningElement) {
-  this.token("<");
+  this.token("<", false, 0, true);
   this.print(node.name);
-  if (process.env.BABEL_8_BREAKING) {
-    //@ts-ignore(Babel 7 vs Babel 8) Babel 8 AST
-    this.print(node.typeArguments);
-  } else {
-    if (node.typeArguments) {
-      this.print(node.typeArguments); // Flow AST
-    }
-    // @ts-ignore(Babel 7 vs Babel 8) Removed in Babel 8
-    this.print(node.typeParameters); // Legacy TS AST
-  }
+
+  this.print(node.typeArguments);
 
   if (node.attributes.length > 0) {
     this.space();
@@ -99,7 +91,10 @@ export function JSXOpeningElement(this: Printer, node: t.JSXOpeningElement) {
   }
   if (node.selfClosing) {
     this.space();
+    this.sourceWithOffset("end", node.loc, -2);
     this.token("/");
+  } else {
+    this.sourceWithOffset("end", node.loc, -1);
   }
   this.token(">");
 }
@@ -108,6 +103,7 @@ export function JSXClosingElement(this: Printer, node: t.JSXClosingElement) {
   this.token("<");
   this.token("/");
   this.print(node.name);
+  this.sourceWithOffset("end", node.loc, -1);
   this.token(">");
 }
 
@@ -128,12 +124,14 @@ export function JSXFragment(this: Printer, node: t.JSXFragment) {
   this.print(node.closingFragment);
 }
 
-export function JSXOpeningFragment(this: Printer) {
-  this.token("<");
+export function JSXOpeningFragment(this: Printer, node: t.JSXOpeningFragment) {
+  this.token("<", false, 0, true);
+  this.sourceWithOffset("end", node.loc, -1);
   this.token(">");
 }
 
-export function JSXClosingFragment(this: Printer) {
+export function JSXClosingFragment(this: Printer, node: t.JSXClosingFragment) {
   this.token("</");
+  this.sourceWithOffset("end", node.loc, -1);
   this.token(">");
 }
