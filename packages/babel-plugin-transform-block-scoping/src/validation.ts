@@ -1,5 +1,6 @@
 import { types as t } from "@babel/core";
 import type { Scope, NodePath, PluginPass } from "@babel/core";
+import { isVarInLoopHead } from "./loop.ts";
 
 export function validateUsage(
   path: NodePath<t.VariableDeclaration>,
@@ -83,7 +84,27 @@ function disallowConstantViolations(
   }
 }
 
+// The bindings declared in a loop head are initialized before the parts of
+// the loop that follow the head are evaluated, so references there are never
+// in the TDZ, even when they are executed conditionally:
+//   for (const x of y) if (cond) x;
+function isEvaluatedAfterLoopHead(refPath: NodePath, bindingPath: NodePath) {
+  if (!bindingPath.isVariableDeclarator()) return false;
+  const declPath = bindingPath.parentPath;
+  if (!isVarInLoopHead(declPath)) return false;
+
+  const loop = declPath.parent as t.ForStatement | t.ForXStatement;
+  const afterHead: t.Node[] = [loop.body];
+  if (t.isForStatement(loop)) {
+    if (loop.test) afterHead.push(loop.test);
+    if (loop.update) afterHead.push(loop.update);
+  }
+  return !!refPath.find(p => afterHead.includes(p.node));
+}
+
 function getTDZStatus(refPath: NodePath, bindingPath: NodePath) {
+  if (isEvaluatedAfterLoopHead(refPath, bindingPath)) return "outside";
+
   const executionStatus = bindingPath._guessExecutionStatusRelativeTo(refPath);
 
   if (executionStatus === "before") {
@@ -177,10 +198,7 @@ function injectTDZChecks(binding: Scope.Binding, state: PluginPass) {
       }
     } else if (path.isAssignmentExpression()) {
       const nodes = [];
-      const ids = process.env.BABEL_8_BREAKING
-        ? path.getAssignmentIdentifiers()
-        : path.getBindingIdentifiers();
-
+      const ids = path.getAssignmentIdentifiers();
       for (const name of Object.keys(ids)) {
         const replacement = getTDZReplacement(path, state, ids[name]);
         if (replacement) {
@@ -197,7 +215,7 @@ function injectTDZChecks(binding: Scope.Binding, state: PluginPass) {
   for (const path of binding.referencePaths as NodePath<t.Identifier>[]) {
     if (path.parentPath.isUpdateExpression()) continue;
     // It will be handled after transforming the loop
-    if (path.parentPath.isFor({ left: path.node })) continue;
+    if (path.parentPath.isForXStatement({ left: path.node })) continue;
 
     const replacement = getTDZReplacement(path, state);
     if (!replacement) continue;

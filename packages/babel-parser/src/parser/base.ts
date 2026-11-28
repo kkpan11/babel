@@ -9,7 +9,7 @@ import type {
   ParserPluginWithOptions,
   PluginConfig,
   PluginOptions,
-} from "../typings.ts";
+} from "../typings.d.ts";
 import type * as N from "../types.ts";
 
 export default class BaseParser {
@@ -29,6 +29,21 @@ export default class BaseParser {
   declare exportedIdentifiers: Set<string>;
   sawUnambiguousESM: boolean = false;
   ambiguousScriptDifferentAst: boolean = false;
+  // Where a `module` token followed by `{` is an identifier followed by a class
+  // body rather than a module expression: the start of a class heritage, after
+  // skipping its leading `new`s.
+  classHeritageStart: number = -1;
+
+  // Used by the Flow and TypeScript plugins to signify the start of an
+  // expression which looks like a typed arrow function, but it isn't.
+  // Contains source positions.
+  // e.g. a ? (b) : c => d
+  //          ^
+  // This only depends on the input, so it is not in the state: it is not
+  // reset when backtracking, so that nested conditional expressions don't
+  // try to parse the same arrow function again, which would take
+  // exponential time.
+  noArrowAt = new Set<number>();
 
   // Initialized by Tokenizer
   declare state: State;
@@ -37,7 +52,9 @@ export default class BaseParser {
   declare input: string;
   declare length: number;
   // Comment store for Program.comments
-  declare comments: Array<N.Comment>;
+  declare comments: N.Comment[];
+
+  declare locData: Uint32Array;
 
   sourceToOffsetPos(sourcePos: number) {
     return sourcePos + this.startIndex;

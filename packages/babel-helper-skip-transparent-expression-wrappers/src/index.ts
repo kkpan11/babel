@@ -1,6 +1,7 @@
 import {
   isParenthesizedExpression,
   isTSAsExpression,
+  isTSInstantiationExpression,
   isTSNonNullExpression,
   isTSSatisfiesExpression,
   isTSTypeAssertion,
@@ -12,6 +13,7 @@ import type { NodePath } from "@babel/traverse";
 
 export type TransparentExprWrapper =
   | t.TSAsExpression
+  | t.TSInstantiationExpression
   | t.TSSatisfiesExpression
   | t.TSTypeAssertion
   | t.TSNonNullExpression
@@ -28,6 +30,7 @@ export function isTransparentExprWrapper(
 ): node is TransparentExprWrapper {
   return (
     isTSAsExpression(node) ||
+    isTSInstantiationExpression(node) ||
     isTSSatisfiesExpression(node) ||
     isTSTypeAssertion(node) ||
     isTSNonNullExpression(node) ||
@@ -40,11 +43,14 @@ export function skipTransparentExprWrappers(
   path: NodePath<t.Expression>,
 ): NodePath<t.Expression> {
   while (isTransparentExprWrapper(path.node)) {
-    path = path.get("expression");
+    path = (path as NodePath<TransparentExprWrapper>).get("expression");
   }
   return path;
 }
 
+export function skipTransparentExprWrapperNodes<T extends t.Node>(
+  node: T,
+): T extends t.Expression ? t.Expression : T;
 export function skipTransparentExprWrapperNodes(
   node: t.Expression | t.Super,
 ): t.Expression | t.Super {

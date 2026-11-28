@@ -1,5 +1,5 @@
 import type { Handler } from "gensync";
-import type { PluginTarget, PluginOptions } from "./validation/options.ts";
+import type { PluginItem, PresetItem } from "./validation/options.ts";
 
 import path from "node:path";
 import { createDescriptor } from "./config-descriptors.ts";
@@ -19,18 +19,14 @@ export function createItemFromDescriptor<API>(
  * and re-evaluating the plugin/preset function.
  */
 export function* createConfigItem<API>(
-  value:
-    | PluginTarget
-    | [PluginTarget, PluginOptions]
-    | [PluginTarget, PluginOptions, string | void],
-  {
-    dirname = ".",
-    type,
-  }: {
+  value: PluginItem | PresetItem,
+  // Not destructured, so the emitted .d.ts has labeled tuples (TS < 5.2 needs it)
+  options: {
     dirname?: string;
     type?: "preset" | "plugin";
   } = {},
 ): Handler<ConfigItem<API>> {
+  const { dirname = ".", type } = options;
   const descriptor = yield* createDescriptor(value, path.resolve(dirname), {
     type,
     alias: "programmatic item",
@@ -39,7 +35,7 @@ export function* createConfigItem<API>(
   return createItemFromDescriptor(descriptor);
 }
 
-const CONFIG_ITEM_BRAND = Symbol.for("@babel/core@7 - ConfigItem");
+const CONFIG_ITEM_BRAND = Symbol.for("@babel/core@8 - ConfigItem");
 
 export function getItemDescriptor<API>(
   item: unknown,
@@ -68,7 +64,6 @@ class ConfigItem<API> {
    */
   _descriptor: UnloadedDescriptor<API>;
 
-  // TODO(Babel 9): Check if this symbol needs to be updated
   /**
    * Used to detect ConfigItem instances from other Babel instances.
    */

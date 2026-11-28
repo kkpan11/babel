@@ -26,6 +26,9 @@ export interface CommonJSHook {
     metadata: SourceMetadata,
     importNodes: t.Node[],
   ): string | null;
+  getDynamicImportWrapper?(
+    node: t.ImportExpression,
+  ): ((ns: t.Expression) => t.Expression) | null;
 }
 
 export function defineCommonJSHook(file: File, hook: CommonJSHook) {
@@ -34,20 +37,29 @@ export function defineCommonJSHook(file: File, hook: CommonJSHook) {
   hooks.push(hook);
 }
 
-function findMap<T, U>(arr: T[] | null, cb: (el: T) => U): U | null {
+function findMap<T, U>(
+  arr: T[] | null,
+  cb: (el: T) => U,
+): NonNullable<U> | null {
   if (arr) {
     for (const el of arr) {
       const res = cb(el);
-      if (res != null) return res;
+      if (res != null) return res ?? null;
     }
   }
+  return null;
 }
 
 export function makeInvokers(
   file: File,
-): Pick<
-  CommonJSHook,
-  "wrapReference" | "getWrapperPayload" | "buildRequireWrapper"
+): Required<
+  Pick<
+    CommonJSHook,
+    | "wrapReference"
+    | "getWrapperPayload"
+    | "buildRequireWrapper"
+    | "getDynamicImportWrapper"
+  >
 > {
   const hooks: CommonJSHook[] | null = file.get(commonJSHooksKey);
 
@@ -60,6 +72,9 @@ export function makeInvokers(
     },
     buildRequireWrapper(...args) {
       return findMap(hooks, hook => hook.buildRequireWrapper?.(...args));
+    },
+    getDynamicImportWrapper(...args) {
+      return findMap(hooks, hook => hook.getDynamicImportWrapper?.(...args));
     },
   };
 }

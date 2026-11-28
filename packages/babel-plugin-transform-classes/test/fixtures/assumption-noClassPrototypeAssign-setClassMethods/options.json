@@ -1,0 +1,13 @@
+{
+  "plugins": [
+    "transform-function-name",
+    "transform-classes",
+    "transform-spread",
+    "transform-block-scoping"
+  ],
+  "assumptions": {
+    "noClassPrototypeAssign": true,
+    "setClassMethods": true,
+    "iterableIsArray": true
+  }
+}

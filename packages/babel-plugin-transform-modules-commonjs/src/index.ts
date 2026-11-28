@@ -7,7 +7,6 @@ import {
   buildNamespaceInitStatements,
   ensureStatementsHoisted,
   wrapInterop,
-  getModuleName,
 } from "@babel/helper-module-transforms";
 import { template, types as t } from "@babel/core";
 import type { PluginPass, Visitor, Scope, NodePath } from "@babel/core";
@@ -24,8 +23,10 @@ export interface Options extends PluginOptions {
   allowTopLevelThis?: boolean;
   importInterop?: RewriteModuleStatementsAndPrepareHeaderOptions["importInterop"];
   lazy?: RewriteModuleStatementsAndPrepareHeaderOptions["lazy"];
+  /** @deprecated Use the `constantReexports` and `enumerableModuleMeta` assumptions instead. */
   loose?: boolean;
   mjsStrictNamespace?: boolean;
+  /** @deprecated Use the `importInterop` instead. */
   noInterop?: boolean;
   strict?: boolean;
   strictMode?: boolean;
@@ -33,7 +34,14 @@ export interface Options extends PluginOptions {
 }
 
 export default declare((api, options: Options) => {
-  api.assertVersion(REQUIRED_VERSION(7));
+  api.assertVersion(REQUIRED_VERSION("^7.0.0-0 || ^8.0.0"));
+
+  if ("loose" in options) {
+    console.warn(
+      "@babel/plugin-transform-modules-commonjs: The 'loose' option has been deprecated, " +
+        "use the `constantReexports` and `enumerableModuleMeta` assumptions instead (https://babeljs.io/assumptions).",
+    );
+  }
 
   const {
     // 'true' for imports to strictly have .default, instead of having
@@ -47,8 +55,7 @@ export default declare((api, options: Options) => {
     allowTopLevelThis,
     strict,
     strictMode,
-    noInterop,
-    importInterop,
+    importInterop = options.noInterop ? "none" : "babel",
     lazy = false,
     // Defaulting to 'true' for now. May change before 7.x major.
     allowCommonJSExports = true,
@@ -120,7 +127,6 @@ export default declare((api, options: Options) => {
 
       path.replaceWith(
         t.assignmentExpression(
-          // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
           (path.node.operator[0] + "=") as t.AssignmentExpression["operator"],
           arg.node,
           getAssertion(localName),
@@ -174,21 +180,36 @@ export default declare((api, options: Options) => {
       if (lazy) defineCommonJSHook(this.file, lazyImportsHook(lazy));
     },
 
-    visitor: {
-      ["CallExpression" +
-        (api.types.importExpression ? "|ImportExpression" : "")](
+    visitor: api.traverse.explode({
+      "CallExpression|ImportExpression"(
         this: PluginPass,
         path: NodePath<t.CallExpression | t.ImportExpression>,
       ) {
-        if (!this.file.has("@babel/plugin-proposal-dynamic-import")) return;
-        if (path.isCallExpression() && !t.isImport(path.node.callee)) return;
+        let wrapNamespace: ((ns: t.Expression) => t.Expression) | null = null;
+        if (
+          path.isImportExpression() &&
+          (path.node.phase != null || path.node.sync)
+        ) {
+          // `import.source()`, `import.defer()` and `import.sync()` can't be
+          // compiled to a regular dynamic import, unless a hook (such as the
+          // one defined by @babel/plugin-proposal-import-defer) handles them.
+          // In that case they are compiled regardless of whether regular
+          // dynamic imports are.
+          wrapNamespace = makeInvokers(this.file).getDynamicImportWrapper(
+            path.node,
+          );
+          if (!wrapNamespace) return;
+        } else {
+          if (!this.file.has("@babel/plugin-proposal-dynamic-import")) return;
+          if (path.isCallExpression() && !t.isImport(path.node.callee)) return;
+        }
 
         let { scope } = path;
         do {
           scope.rename("require");
-        } while ((scope = scope.parent));
+        } while ((scope = scope.parent!));
 
-        transformDynamicImport(path, noInterop, this.file);
+        transformDynamicImport(path, importInterop, this.file, wrapNamespace);
       },
 
       Program: {
@@ -212,10 +233,6 @@ export default declare((api, options: Options) => {
             });
           }
 
-          let moduleName = getModuleName(this.file.opts, options);
-          // @ts-expect-error todo(flow->ts): do not reuse variables
-          if (moduleName) moduleName = t.stringLiteral(moduleName);
-
           const hooks = makeInvokers(this.file);
 
           const { meta, headers } = rewriteModuleStatementsAndPrepareHeader(
@@ -227,13 +244,33 @@ export default declare((api, options: Options) => {
               strict,
               strictMode,
               allowTopLevelThis,
-              noInterop,
               importInterop,
               wrapReference: hooks.wrapReference,
-              getWrapperPayload: hooks.getWrapperPayload,
+              getWrapperPayload: (source, metadata, importNodes) => {
+                const payload = hooks.getWrapperPayload(
+                  source,
+                  metadata,
+                  importNodes,
+                );
+                if (payload == null) {
+                  // Deferred imports are implemented by a wrapper around the
+                  // module, provided by the import defer plugin.
+                  const deferred = importNodes.find(
+                    node =>
+                      t.isImportDeclaration(node) && node.phase === "defer",
+                  );
+                  if (deferred) {
+                    throw this.file.buildCodeFrameError(
+                      deferred,
+                      "Transforming `import defer * as ns from '...'` requires `@babel/plugin-proposal-import-defer`.",
+                    );
+                  }
+                }
+                return payload;
+              },
               esNamespaceOnly:
                 typeof state.filename === "string" &&
-                /\.mjs$/.test(state.filename)
+                state.filename.endsWith(".mjs")
                   ? mjsStrictNamespace
                   : strictNamespace,
               noIncompleteNsImportDetection,
@@ -246,7 +283,7 @@ export default declare((api, options: Options) => {
               t.stringLiteral(source),
             ]);
 
-            let header: t.Statement;
+            let header: t.Statement | null;
             if (isSideEffectImport(metadata)) {
               if (lazy && metadata.wrap === "function") {
                 throw new Error("Assertion failure");
@@ -294,6 +331,6 @@ export default declare((api, options: Options) => {
           });
         },
       },
-    },
+    }),
   };
 });

@@ -1,10 +1,9 @@
 import { parse } from "@babel/parser";
 
-import _traverse from "../lib/index.js";
-const traverse = _traverse.default || _traverse;
+import traverse from "../lib/index.js";
 
-function getPath(code) {
-  const ast = parse(code);
+function getPath(code, parserOptions) {
+  const ast = parse(code, parserOptions);
   let path;
   traverse(ast, {
     Program: function (_path) {
@@ -90,6 +89,33 @@ describe("evaluation", function () {
         .get("body")[1]
         .evaluateTruthy(),
     ).toBe(true);
+  });
+
+  it.each([
+    ["as expressions", "1 as number"],
+    ["satisfies expressions", "1 satisfies number"],
+    ["type assertions", "<number>1"],
+    ["non-null expressions", "1!"],
+  ])("should evaluate TypeScript %s", function (_name, expression) {
+    const result = getPath(`const value = ${expression}; value;`, {
+      plugins: ["typescript"],
+    })
+      .get("body.1.expression")
+      .evaluate();
+
+    expect(result.confident).toBe(true);
+    expect(result.value).toBe(1);
+  });
+
+  it("should evaluate TypeScript instantiation expressions", function () {
+    const result = getPath("const value = 1; value<number>;", {
+      plugins: ["typescript"],
+    })
+      .get("body.1.expression")
+      .evaluate();
+
+    expect(result.confident).toBe(true);
+    expect(result.value).toBe(1);
   });
 
   it("should deopt when var is redeclared in the same scope", function () {
@@ -202,17 +228,13 @@ describe("evaluation", function () {
         .evaluate().value,
     ).toBe("?x=1");
 
-    if (process.env.BABEL_8_BREAKING) {
-      // eslint-disable-next-line jest/no-conditional-expect
-      expect(
-        getPath("btoa('babel');").get("body.0.expression").evaluate().value,
-      ).toBe("YmFiZWw=");
+    expect(
+      getPath("btoa('babel');").get("body.0.expression").evaluate().value,
+    ).toBe("YmFiZWw=");
 
-      // eslint-disable-next-line jest/no-conditional-expect
-      expect(
-        getPath("atob('YmFiZWw=');").get("body.0.expression").evaluate().value,
-      ).toBe("babel");
-    }
+    expect(
+      getPath("atob('YmFiZWw=');").get("body.0.expression").evaluate().value,
+    ).toBe("babel");
   });
 
   it("should not deopt vars in different scope", function () {
@@ -415,6 +437,89 @@ describe("evaluation", function () {
     expect(evalResult.confident).toBe(false);
   });
 
+  describe("var whose initializer may not have run", function () {
+    function evaluateX(code) {
+      let result;
+      traverse(parse(code, { sourceType: "module", plugins: ["typescript"] }), {
+        ReferencedIdentifier(path) {
+          if (path.node.name === "x") result = path.evaluate();
+        },
+      });
+      return result;
+    }
+
+    it.each([
+      [
+        "read in a nested function",
+        "function f(c) { if (c) { var x = 1; } function g() { return x; } }",
+      ],
+      [
+        "read in an arrow function",
+        "function f(c) { if (c) { var x = 1; } () => x; }",
+      ],
+      [
+        "read in a sibling block",
+        "function f(a, b) { if (a) { var x = 1; } if (b) { x; } }",
+      ],
+      [
+        "read in the else branch",
+        "function f(c) { if (c) { var x = 1; } else { x; } }",
+      ],
+      [
+        "declared in a switch case",
+        "function f(c) { switch (c) { case 1: var x = 2; } x; }",
+      ],
+      [
+        "read in a later switch case",
+        "function f(c) { switch (c) { case 1: var x = 2; case 2: x; } }",
+      ],
+      [
+        "declared in an if without a block",
+        "function f(c) { if (c) var x = 1; x; }",
+      ],
+      [
+        "declared in a labeled block",
+        "function f(c) { l: { if (c) break l; { var x = 1; } } x; }",
+      ],
+    ])("deopts when %s", function (_, code) {
+      expect(evaluateX(code).confident).toBe(false);
+    });
+
+    it.each([
+      [
+        "read in a nested function",
+        "function f() { var x = 1; function g() { return x; } }",
+      ],
+      [
+        "read in a nested function, declared in a plain block",
+        "function f() { { var x = 1; } function g() { return x; } }",
+      ],
+      [
+        "read in a function in the same block",
+        "function f(c) { if (c) { var x = 1; function g() { return x; } } }",
+      ],
+      [
+        "read later in the same switch case",
+        "function f(c) { switch (c) { case 1: var x = 1; x; } }",
+      ],
+      [
+        "declared in a for initializer",
+        "function f(c) { for (var x = 1; c; ) {} x; }",
+      ],
+      ["exported", "export var x = 1; x;"],
+      ["declared with a label", "l: var x = 1; x;"],
+      [
+        "declared in nested plain blocks of a function",
+        "function f() { { { var x = 1; } } return x; }",
+      ],
+      ["declared in a static block", "class A { static { var x = 1; x; } }"],
+      ["declared in a TS namespace", "namespace N { var x = 1; x; }"],
+      ["read in a later declarator", "var x = 1, y = x;"],
+    ])("evaluates when %s", function (_, code) {
+      expect(evaluateX(code)).toMatchObject({ confident: true, value: 1 });
+    });
+  });
+
   it("should not evaluate arrays with multiple references", function () {
     const path = getPath(`
       const value = [];
@@ -443,6 +548,56 @@ describe("evaluation", function () {
     `);
     const evalResult = path.get("body.2.expression").evaluate();
     expect(evalResult.confident).toBe(true);
+  });
+
+  it("should not evaluate arrays with new references", function () {
+    const path = getPath(`
+      let value = [];
+      value.push(Math.random());
+      let value2 = value;
+      value2;
+    `);
+    const evalResult = path.get("body.3.expression").evaluate();
+    expect(evalResult.confident).toBe(false);
+  });
+
+  it("should not evaluate Math.method when Math is shadowed by local variable", function () {
+    const path = getPath(`
+      function test(Math) {
+        Math.min(1, 2);
+      }
+    `);
+    const evalResult = path.get("body.0.body.body.0.expression").evaluate();
+    expect(evalResult.confident).toBe(false);
+  });
+
+  it("should evaluate standard global objects when not shadowed", function () {
+    const path = getPath("Math.min(1, 2);");
+    const evalResult = path.get("body.0.expression").evaluate();
+    expect(evalResult.confident).toBe(true);
+    expect(evalResult.value).toBe(1);
+  });
+
+  it("should deopt for destructured bindings", function () {
+    const cases = [
+      "const { a } = { a: 1 }; a;",
+      "const { a: b } = { a: 1 }; b;",
+      "const { a = 1 } = {}; a;",
+      "const { ['a']: a } = { a: 1 }; a;",
+      "const { ...a } = {}; a;",
+      "const { x: { a } } = { x: { a: 1 } }; a;",
+      "const [a] = [1]; a;",
+      "const [, a] = [1, 2]; a;",
+      "const [a = 1] = []; a;",
+      "const [...a] = [1]; a;",
+      "const [[a]] = [[1]]; a;",
+    ];
+
+    for (const code of cases) {
+      const path = getPath(code);
+      const evalResult = path.get("body.1.expression").evaluate();
+      expect(evalResult.confident).toBe(false);
+    }
   });
 
   addDeoptTest("({a:{b}})", "ObjectExpression", "Identifier");

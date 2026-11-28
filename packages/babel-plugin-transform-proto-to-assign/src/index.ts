@@ -2,14 +2,19 @@ import { declare } from "@babel/helper-plugin-utils";
 import { types as t, type File } from "@babel/core";
 
 export default declare(api => {
-  api.assertVersion(REQUIRED_VERSION(7));
+  api.assertVersion(REQUIRED_VERSION("^7.0.0-0 || ^8.0.0"));
 
-  function isProtoKey(node: t.ObjectExpression["properties"][number]) {
+  // Only `__proto__: value` sets the prototype. The shorthand, computed and
+  // method forms define a property named "__proto__".
+  function isProtoSetter(
+    node: t.ObjectExpression["properties"][number],
+  ): node is t.ObjectProperty & { value: t.Expression } {
     return (
-      !t.isSpreadElement(node) &&
-      t.isStringLiteral(t.toComputedKey(node, node.key), {
-        value: "__proto__",
-      })
+      t.isObjectProperty(node) &&
+      !node.computed &&
+      !node.shorthand &&
+      (t.isIdentifier(node.key, { name: "__proto__" }) ||
+        t.isStringLiteral(node.key, { value: "__proto__" }))
     );
   }
 
@@ -32,7 +37,7 @@ export default declare(api => {
   ) {
     return t.expressionStatement(
       t.callExpression(file.addHelper("defaults"), [
-        // @ts-ignore(Babel 7 vs Babel 8) Fixme: support `super.__proto__ = ...`
+        // @ts-expect-error(Babel 7 vs Babel 8) TODO(Babel 8)
         ref,
         expr.right,
       ]),
@@ -44,6 +49,9 @@ export default declare(api => {
 
     visitor: {
       AssignmentExpression(path, { file }) {
+        // `a.__proto__ += b` and `a.__proto__ ??= b` do not only set the
+        // prototype.
+        if (path.node.operator !== "=") return;
         if (!isProtoAssignmentExpression(path.node.left)) return;
 
         const nodes = [];
@@ -57,7 +65,6 @@ export default declare(api => {
                 "=",
                 temp,
                 // left must not be Super when `temp` is an identifier
-                // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
                 left as t.Expression,
               ),
             ),
@@ -93,8 +100,7 @@ export default declare(api => {
 
         for (let i = 0; i < properties.length; i++) {
           const prop = properties[i];
-          if (isProtoKey(prop)) {
-            // @ts-expect-error Fixme: we should also handle ObjectMethod with __proto__ key
+          if (isProtoSetter(prop)) {
             proto = prop.value;
             properties.splice(i, 1);
             break;

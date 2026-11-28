@@ -1,4 +1,4 @@
-import { types as t, template, type NodePath } from "@babel/core";
+import { types as t, template, type NodePath, type Scope } from "@babel/core";
 import {
   skipTransparentExprWrapperNodes,
   skipTransparentExprWrappers,
@@ -25,12 +25,35 @@ function isSimpleMemberExpression(
 }
 
 /**
+ * Like `scope.isStatic`, but also accepts all the bindings. Reassigned
+ * bindings and imports (which the exporting module might reassign) can change
+ * value, but no code can run between the nullish check of an optional chain
+ * and the following access, so it's safe to read them twice there.
+ * Reading an undeclared global might trigger a getter on `globalThis`, so we
+ * only read it twice with the `pureGetters` assumption.
+ *
+ * Do not use this for the `this` context of calls: `a.b?.()` evaluates the `b`
+ * getter between the two reads of `a`.
+ */
+function isStaticForNullishCheck(
+  scope: Scope,
+  node: t.Node,
+  pureGetters: boolean,
+) {
+  if (t.isIdentifier(node)) {
+    return pureGetters || scope.hasBinding(node.name);
+  }
+  return scope.isStatic(node);
+}
+
+/**
  * Test if a given optional chain `path` needs to be memoized
  * @param {NodePath} path
  * @returns {boolean}
  */
 function needsMemoize(
   path: NodePath<t.OptionalCallExpression | t.OptionalMemberExpression>,
+  pureGetters: boolean,
 ) {
   let optionalPath: NodePath = path;
   const { scope } = path;
@@ -45,7 +68,7 @@ function needsMemoize(
         : optionalPath.get("callee"),
     );
     if (node.optional) {
-      return !scope.isStatic(childPath.node);
+      return !isStaticForNullishCheck(scope, childPath.node, pureGetters);
     }
 
     optionalPath = childPath;
@@ -77,7 +100,7 @@ export function transformOptionalChain(
 
   // Replace `function (a, x = a.b?.c) {}` to `function (a, x = (() => a.b?.c)() ){}`
   // so the temporary variable can be injected in correct scope
-  if (scope.path.isPattern() && needsMemoize(path)) {
+  if (scope.path.isPattern() && needsMemoize(path, pureGetters)) {
     replacementPath.replaceWith(
       template.expression.ast`(() => ${replacementPath.node})()`,
     );
@@ -121,8 +144,7 @@ export function transformOptionalChain(
 
   for (let i = optionals.length - 1; i >= 0; i--) {
     const node = optionals[i] as unknown as
-      | t.MemberExpression
-      | t.CallExpression;
+      t.MemberExpression | t.CallExpression;
 
     const isCall = t.isCallExpression(node);
 
@@ -143,7 +165,7 @@ export function transformOptionalChain(
       // we can avoid a needless memoize. We only do this if the callee is a simple member
       // expression, to avoid multiple calls to nested call expressions.
       check = ref = node.callee;
-    } else if (scope.isStatic(chain)) {
+    } else if (isStaticForNullishCheck(scope, chain, pureGetters)) {
       check = ref = chainWithTypes;
     } else {
       // We cannot reuse the tmpVar for calls, because we need to
@@ -159,7 +181,6 @@ export function transformOptionalChain(
         // Here `chainWithTypes` MUST NOT be cloned because it could be
         // updated when generating the memoised context of a call
         // expression. It must be an Expression when `ref` is an identifier
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
         chainWithTypes as t.Expression,
       );
 
@@ -223,8 +244,8 @@ export function transformOptionalChain(
 
   // prettier-ignore
   const tpl = ifNullishFalse
-    ? (noDocumentAll ? NULLISH_CHECK_NO_DDA_NEG : NULLISH_CHECK_NEG)
-    : (noDocumentAll ? NULLISH_CHECK_NO_DDA : NULLISH_CHECK);
+    ?( noDocumentAll ? NULLISH_CHECK_NO_DDA_NEG : NULLISH_CHECK_NEG)
+    :( noDocumentAll ? NULLISH_CHECK_NO_DDA : NULLISH_CHECK);
   const logicalOp = ifNullishFalse ? "&&" : "||";
 
   const check = checks
@@ -257,27 +278,28 @@ export function transform(
       t.booleanLiteral(true),
     );
   } else {
-    let wrapLast;
+    let wrapLast: ((value: t.Expression) => t.Expression) | undefined;
     if (
-      parentPath.isCallExpression({ callee: maybeWrapped.node }) &&
+      (parentPath.isCallExpression({ callee: maybeWrapped.node }) ||
+        parentPath.isTaggedTemplateExpression({ tag: maybeWrapped.node })) &&
       // note that the first condition must implies that `path.optional` is `true`,
       // otherwise the parentPath should be an OptionalCallExpression
       path.isOptionalMemberExpression()
     ) {
-      // Ensure (a?.b)() has proper `this`
-      wrapLast = (replacement: t.MemberExpression) => {
+      // Ensure (a?.b)() and (a?.b)`` have proper `this`
+      wrapLast = ((replacement: t.MemberExpression) => {
         // `(a?.b)()` to `(a == null ? undefined : a.b.bind(a))()`
         // object must not be Super as super?.foo is invalid
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+
         const object = skipTransparentExprWrapperNodes(
           replacement.object,
         ) as t.Expression;
-        let baseRef: t.Expression;
+        let baseRef: t.Expression | undefined;
         if (!assumptions.pureGetters || !isSimpleMemberExpression(object)) {
           // memoize the context object when getters are not always pure
           // or the object is not a simple member expression
           // `(a?.b.c)()` to `(a == null ? undefined : (_a$b = a.b).c.bind(_a$b))()`
-          baseRef = scope.maybeGenerateMemoised(object);
+          baseRef = scope.maybeGenerateMemoised(object)!;
           if (baseRef) {
             replacement.object = t.assignmentExpression("=", baseRef, object);
           }
@@ -286,7 +308,7 @@ export function transform(
           t.memberExpression(replacement, t.identifier("bind")),
           [t.cloneNode(baseRef ?? object)],
         );
-      };
+      }) as (value: t.Expression) => t.Expression;
     }
 
     transformOptionalChain(
@@ -295,7 +317,7 @@ export function transform(
       path,
       willPathCastToBoolean(maybeWrapped)
         ? t.booleanLiteral(false)
-        : scope.buildUndefinedNode(),
+        : t.buildUndefinedNode(),
       wrapLast,
     );
   }

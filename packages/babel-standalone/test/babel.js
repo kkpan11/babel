@@ -11,7 +11,7 @@ describe("@babel/standalone", () => {
   describe("export packages", () => {
     it("list", () => {
       expect(Object.keys(Babel.packages)).toMatchInlineSnapshot(`
-        Array [
+        [
           "generator",
           "parser",
           "template",
@@ -39,10 +39,33 @@ describe("@babel/standalone", () => {
     );
   });
   it("handles the es2015-loose preset", () => {
-    const output = Babel.transform("class A {}", {
-      sourceType: "script",
-      presets: ["es2015-loose"],
-    }).code;
+    // es2015-loose passes the deprecated `loose` option to its plugins
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    let output;
+    try {
+      output = Babel.transform("class A {}", {
+        sourceType: "script",
+        presets: ["es2015-loose"],
+      }).code;
+      expect(warn.mock.calls.map(([msg]) => msg.split(":")[0]))
+        .toMatchInlineSnapshot(`
+        [
+          "@babel/plugin-transform-template-literals",
+          "@babel/plugin-transform-classes",
+          "@babel/plugin-transform-computed-properties",
+          "@babel/plugin-transform-for-of",
+          "@babel/plugin-transform-spread",
+          "@babel/plugin-transform-parameters",
+          "@babel/plugin-transform-destructuring",
+          "@babel/plugin-transform-modules-commonjs",
+        ]
+      `);
+      for (const [msg] of warn.mock.calls) {
+        expect(msg).toContain("The 'loose' option has been deprecated");
+      }
+    } finally {
+      warn.mockRestore();
+    }
     expect(output).toBe('var A = function A() {\n  "use strict";\n};');
   });
   it("handles the typescript preset", () => {
@@ -58,7 +81,7 @@ describe("@babel/standalone", () => {
     }).code;
     expect(output).toBe("var a;");
   });
-  it("can translate simple ast", () => {
+  it("can synchronously translate simple ast", () => {
     const ast = {
       type: "Program",
       start: 0,
@@ -84,6 +107,43 @@ describe("@babel/standalone", () => {
       presets: ["es2015"],
     }).code;
     expect(output).toBe("42;");
+  });
+  it("can asynchronously translate simple ast", async () => {
+    const ast = {
+      type: "Program",
+      start: 0,
+      end: 2,
+      directives: [],
+      body: [
+        {
+          type: "ExpressionStatement",
+          start: 0,
+          end: 1,
+          expression: {
+            type: "NumericLiteral",
+            start: 0,
+            end: 2,
+            value: 42,
+            raw: "42",
+          },
+        },
+      ],
+      sourceType: "script",
+    };
+    const output = (
+      await Babel.transformFromAstAsync(ast, "42", {
+        presets: ["es2015"],
+      })
+    ).code;
+    expect(output).toBe("42;");
+  });
+  it("can asynchronously translate simple code", async () => {
+    const output = (
+      await Babel.transformAsync("const a = 42;", {
+        presets: ["es2015"],
+      })
+    ).code;
+    expect(output).toBe(`"use strict";\n\nvar a = 42;`);
   });
 
   it("handles the react preset", () => {
@@ -117,10 +177,10 @@ describe("@babel/standalone", () => {
   });
 
   it("handles plugins with options", () => {
-    const output = Babel.transform("`${x}`", {
-      plugins: [["transform-template-literals", { loose: true }]],
+    const output = Babel.transform("<div />", {
+      plugins: [["transform-react-jsx", { runtime: "classic", pragma: "h" }]],
     }).code;
-    expect(output).toBe('"" + x;');
+    expect(output).toBe('h("div", null);');
   });
 
   it("throws on invalid preset name", () => {
@@ -129,9 +189,37 @@ describe("@babel/standalone", () => {
     );
   });
 
+  it("throws on invalid preset name with options", () => {
+    expect(() =>
+      Babel.transform("var foo", {
+        presets: [["lolfail", { option: function () {} }]],
+      }),
+    ).toThrow(/Invalid preset specified in Babel options: "lolfail"/);
+  });
+
+  it("throws on falsy preset", () => {
+    expect(() => Babel.transform("var foo", { presets: [null] })).toThrow(
+      /Invalid preset specified in Babel options: "null"/,
+    );
+  });
+
   it("throws on invalid plugin name", () => {
     expect(() => Babel.transform("var foo", { plugins: ["lolfail"] })).toThrow(
       /Invalid plugin specified in Babel options: "lolfail"/,
+    );
+  });
+
+  it("throws on invalid plugin name with options", () => {
+    expect(() =>
+      Babel.transform("var foo", {
+        plugins: [["lolfail", { option: function () {} }]],
+      }),
+    ).toThrow(/Invalid plugin specified in Babel options: "lolfail"/);
+  });
+
+  it("throws on falsy plugin", () => {
+    expect(() => Babel.transform("var foo", { plugins: [null] })).toThrow(
+      /Invalid plugin specified in Babel options: "null"/,
     );
   });
 
@@ -187,21 +275,6 @@ describe("@babel/standalone", () => {
       expect(output).toBe(
         "function Foo() {\n  this instanceof Foo ? this.constructor : void 0;\n}",
       );
-    });
-
-    it("useBuiltIns works", () => {
-      const output = Babel.transform("[].includes(2)", {
-        sourceType: "module",
-        targets: { ie: 11 },
-        presets: [
-          ["env", { useBuiltIns: "usage", corejs: "3.0", modules: false }],
-        ],
-      }).code;
-
-      expect(output).toMatchInlineSnapshot(`
-        "import \\"core-js/modules/es.array.includes.js\\";
-        [].includes(2);"
-      `);
     });
 
     it("regenerator works", () => {
@@ -267,13 +340,6 @@ describe("@babel/standalone", () => {
         }),
       ).not.toThrow();
     });
-    it("#12815 - unicode property letter short alias should be transformed (legacy package)", () => {
-      expect(() =>
-        Babel.transform("/\\p{L}/u", {
-          plugins: ["proposal-unicode-property-regex"],
-        }),
-      ).not.toThrow();
-    });
     it("#12815 - unicode property letter short alias should be transformed", () => {
       expect(() =>
         Babel.transform("/\\p{L}/u", {
@@ -303,7 +369,7 @@ describe("@babel/standalone", () => {
           targets: { chrome: 113 },
           presets: [["env", { modules: false }]],
         }).code,
-      ).toMatchInlineSnapshot(`"/[\\\\w--[b]]/v;"`);
+      ).toMatchInlineSnapshot(`"/[\\w--[b]]/v;"`);
     });
   });
 });

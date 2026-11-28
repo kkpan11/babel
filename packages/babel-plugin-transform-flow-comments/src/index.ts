@@ -4,7 +4,7 @@ import { types as t, type NodePath } from "@babel/core";
 import generateCode from "@babel/generator";
 
 export default declare(api => {
-  api.assertVersion(REQUIRED_VERSION(7));
+  api.assertVersion(REQUIRED_VERSION("^7.0.0-0 || ^8.0.0"));
 
   function commentFromString(comment: string | t.Comment): t.Comment {
     return typeof comment === "string"
@@ -17,26 +17,27 @@ export default declare(api => {
     toPath,
     where = "trailing",
     optional = false,
-    comments = generateComment(ofPath, optional),
+    comments = generateComment(ofPath as NodePath, optional),
     keepType = false,
   }: {
-    ofPath?: NodePath;
-    toPath?: NodePath;
+    ofPath?: NodePath<t.Node | null>;
+    toPath?: NodePath<t.Node | null>;
     where?: t.CommentTypeShorthand;
     optional?: boolean;
     comments?: string | t.Comment | (string | t.Comment)[];
     keepType?: boolean;
   }) {
+    // `ofPath` must be passed when `toPath` may not have a node.
     if (!toPath?.node) {
-      toPath = ofPath.getPrevSibling();
+      toPath = ofPath!.getPrevSibling();
       where = "trailing";
     }
     if (!toPath.node) {
-      toPath = ofPath.getNextSibling();
+      toPath = ofPath!.getNextSibling();
       where = "leading";
     }
     if (!toPath.node) {
-      toPath = ofPath.parentPath;
+      toPath = ofPath!.parentPath!;
       where = "inner";
     }
     if (!Array.isArray(comments)) {
@@ -90,11 +91,11 @@ export default declare(api => {
       .replace(/\*-\//g, "*-ESCAPED/")
       .replace(/\*\//g, "*-/");
     if (optional) comment = "?" + comment;
-    if (comment[0] !== ":") comment = ":: " + comment;
+    if (!comment.startsWith(":")) comment = ":: " + comment;
     return comment;
   }
 
-  function isTypeImport(importKind: "type" | "typeof" | "value") {
+  function isTypeImport(importKind?: "type" | "typeof" | "value" | null) {
     return importKind === "type" || importKind === "typeof";
   }
 
@@ -177,7 +178,7 @@ export default declare(api => {
       ClassProperty(path) {
         const { node } = path;
         if (!node.value) {
-          wrapInFlowComment(path);
+          wrapInFlowComment(path as NodePath<t.ClassProperty>);
         } else if (node.typeAnnotation) {
           attachComment({
             ofPath: path.get("typeAnnotation"),
@@ -270,25 +271,26 @@ export default declare(api => {
 
         if (node.superClass) {
           if (comments.length > 0) {
-            attachComment({
-              toPath: path.get("id"),
-              comments: comments,
-            });
+            if (node.id) {
+              attachComment({
+                toPath: path.get("id"),
+                comments: comments as (string | t.Comment)[],
+              });
+            } else {
+              // Anonymous classes have no id, attach the comments to the class such
+              // that comments appear after the `class` keyword and before `extends`.
+              attachComment({
+                toPath: path,
+                where: "inner",
+                comments: comments as (string | t.Comment)[],
+              });
+            }
             comments = [];
           }
 
-          // superTypeParameters is for compatibility with Babel 7
-          if (
-            process.env.BABEL_8_BREAKING
-              ? // @ts-ignore(Babel 7 vs Babel 8) Renamed
-                node.superTypeArguments
-              : // @ts-ignore(Babel 7 vs Babel 8) Renamed
-                node.superTypeParameters
-          ) {
+          if (node.superTypeArguments) {
             const superTypeArguments = path.get(
-              process.env.BABEL_8_BREAKING
-                ? "superTypeArguments"
-                : "superTypeParameters",
+              "superTypeArguments",
             ) as NodePath<t.TypeParameterInstantiation>;
             comments.push(
               generateComment(
@@ -321,7 +323,7 @@ export default declare(api => {
           attachComment({
             toPath: path.get("body"),
             where: "leading",
-            comments: comments,
+            comments: comments as (string | t.Comment)[],
           });
         }
       },

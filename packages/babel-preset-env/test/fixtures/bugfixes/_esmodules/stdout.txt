@@ -1,0 +1,25 @@
+@babel/preset-env: `DEBUG` option
+
+Using targets:
+{
+  "android": "157",
+  "chrome": "109",
+  "edge": "154",
+  "firefox": "140",
+  "ios": "18.5",
+  "opera": "139",
+  "opera_mobile": "80",
+  "safari": "26.6",
+  "samsung": "30"
+}
+
+Using modules transform: auto
+
+Using plugins:
+  transform-explicit-resource-management { chrome < 141, firefox < 141, ios, opera, opera_mobile, safari, samsung }
+  transform-duplicate-named-capturing-groups-regex { chrome < 126, opera_mobile, samsung }
+  transform-regexp-modifiers { chrome < 125, ios, opera_mobile, safari }
+  transform-unicode-sets-regex { chrome < 112 }
+  transform-export-namespace-from { }
+
+No polyfills were added. @babel/preset-env does not inject polyfills anymore, please use babel-plugin-polyfill-corejs3 instead.

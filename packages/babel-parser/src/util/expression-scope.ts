@@ -1,8 +1,6 @@
 import { Errors, type ParseErrorConstructor } from "../parse-error.ts";
-import type { Position } from "./location.ts";
 import type { Node } from "../types.ts";
 import type Tokenizer from "../tokenizer/index.ts";
-import type { Undone } from "../parser/node.ts";
 
 /**
  * @module util/expression-scope
@@ -25,7 +23,7 @@ some expression scopes and thrown later when we know what the ambiguous pattern 
 - YieldInParameter
 - InvalidParenthesizedAssignment when parenthesized is an identifier
 
-There are four different expression scope
+There are five different expression scope
 - Expression
   A general scope that represents program / function body / static block. No errors
   will be recorded nor thrown in this scope.
@@ -45,6 +43,17 @@ There are four different expression scope
   recorded in this scope will be thrown immediately. No errors will be recorded in
   this scope.
 
+- Initializer
+  A scope that represents an expression that can never be a binding target, but
+  may be nested within (possible) parameters. It is entered by an
+  AssignmentExpression that is not parsed as part of a cover grammar when the
+  current scope is a (possible) ParameterDeclaration, e.g. the
+  initializer `(b) = 1` in `(a = (b) = 1) => {}`, the computed key in
+  `({ [(b) = 1]: a }) => {}` or the decorator argument in
+  `function f(@dec((b) = 1) a) {}`. Parenthesized binding errors will not be
+  recorded in this scope, while parameter initializer errors and async arrow
+  parameter errors will be propagated to its parent scopes.
+
 // @see {@link https://docs.google.com/document/d/1FAvEp9EUK-G8kHfDIEo_385Hs2SUBCYbJ5H-NnLvq8M | V8 Expression Scope design docs}
  */
 
@@ -53,10 +62,11 @@ const enum ExpressionScopeType {
   kMaybeArrowParameterDeclaration = 1,
   kMaybeAsyncArrowParameterDeclaration = 2,
   kParameterDeclaration = 3,
+  kInitializer = 4,
 }
 
 class ExpressionScope {
-  declare type: ExpressionScopeType;
+  declare readonly type: ExpressionScopeType;
 
   constructor(type: ExpressionScopeType = ExpressionScopeType.kExpression) {
     this.type = type;
@@ -72,19 +82,21 @@ class ExpressionScope {
   isCertainlyParameterDeclaration() {
     return this.type === ExpressionScopeType.kParameterDeclaration;
   }
+
+  isInitializer() {
+    return this.type === ExpressionScopeType.kInitializer;
+  }
 }
 
 type ArrowHeadParsingParameterInitializerError =
-  | typeof Errors.AwaitExpressionFormalParameter
-  | typeof Errors.YieldInParameter;
+  typeof Errors.AwaitExpressionFormalParameter | typeof Errors.YieldInParameter;
 type ArrowHeadParsingDeclarationError =
   | ArrowHeadParsingParameterInitializerError
   | typeof Errors.InvalidParenthesizedAssignment
   | typeof Errors.AwaitBindingIdentifier;
 
 class ArrowHeadParsingScope extends ExpressionScope {
-  declarationErrors: Map<number, [ParseErrorConstructor<object>, Position]> =
-    new Map();
+  declarationErrors = new Map<number, ParseErrorConstructor<object>>();
   constructor(
     type:
       | ExpressionScopeType.kMaybeArrowParameterDeclaration
@@ -94,17 +106,15 @@ class ArrowHeadParsingScope extends ExpressionScope {
   }
   recordDeclarationError(
     ParsingErrorClass: ParseErrorConstructor<object>,
-    at: Position,
+    index: number,
   ) {
-    const index = at.index;
-
-    this.declarationErrors.set(index, [ParsingErrorClass, at]);
+    this.declarationErrors.set(index, ParsingErrorClass);
   }
   clearDeclarationError(index: number) {
     this.declarationErrors.delete(index);
   }
   iterateErrors(
-    iterator: (a: [ArrowHeadParsingDeclarationError, Position]) => void,
+    iterator: (a: ArrowHeadParsingDeclarationError, b: number) => void,
   ) {
     this.declarationErrors.forEach(iterator);
   }
@@ -112,7 +122,7 @@ class ArrowHeadParsingScope extends ExpressionScope {
 
 export default class ExpressionScopeHandler {
   parser: Tokenizer;
-  stack: Array<ExpressionScope> = [new ExpressionScope()];
+  stack: ExpressionScope[] = [new ExpressionScope()];
 
   constructor(parser: Tokenizer) {
     this.parser = parser;
@@ -126,6 +136,19 @@ export default class ExpressionScopeHandler {
   }
 
   /**
+   * Whether the current expression may be within (possible) parameters. Otherwise
+   * entering an Initializer scope has no effect, since no binding error is recorded
+   * in the Expression or Initializer scope.
+   */
+  canBeInParameters(): boolean {
+    const scope = this.stack[this.stack.length - 1];
+    return (
+      scope.canBeArrowParameterDeclaration() ||
+      scope.isCertainlyParameterDeclaration()
+    );
+  }
+
+  /**
    * Record likely parameter initializer errors
    *
    * When current scope is a ParameterDeclaration, the error will be thrown immediately,
@@ -134,23 +157,21 @@ export default class ExpressionScopeHandler {
    */
   recordParameterInitializerError(
     toParseError: ArrowHeadParsingParameterInitializerError,
-    node: Undone<Node>,
+    loc: number,
   ): void {
-    const origin = node.loc.start;
     const { stack } = this;
     let i = stack.length - 1;
     let scope: ExpressionScope = stack[i];
     while (!scope.isCertainlyParameterDeclaration()) {
       if (scope.canBeArrowParameterDeclaration()) {
-        scope.recordDeclarationError(toParseError, origin);
-      } else {
-        /*:: invariant(scope.type == ExpressionScopeType.kExpression) */
+        scope.recordDeclarationError(toParseError, loc);
+      } else if (!scope.isInitializer()) {
         // Type-Expression is the boundary where initializer error can populate to
         return;
       }
       scope = stack[--i];
     }
-    this.parser.raise(toParseError, origin);
+    this.parser.raise(toParseError, loc);
   }
 
   /**
@@ -171,6 +192,9 @@ export default class ExpressionScopeHandler {
    * For example, in `( x = ( [(a) = []] = [] ) ) => {}`, we should not record `(a)` in `( x = ... ) =>`
    * arrow scope because when we finish parsing `( [(a) = []] = [] )`, it is an unambiguous assignment
    * expression and can not be cast to pattern
+   *
+   * Similarly, in `( x = (a) = [] ) => {}`, we should not record `(a)` because it is in the
+   * initializer of `x`, which is parsed in an Initializer scope and can never be a binding target
    */
   recordArrowParameterBindingError(
     error: ParseErrorConstructor<object>,
@@ -178,7 +202,7 @@ export default class ExpressionScopeHandler {
   ): void {
     const { stack } = this;
     const scope: ExpressionScope = stack[stack.length - 1];
-    const origin = node.loc.start;
+    const origin = node.start!;
     if (scope.isCertainlyParameterDeclaration()) {
       this.parser.raise(error, origin);
     } else if (scope.canBeArrowParameterDeclaration()) {
@@ -194,17 +218,20 @@ export default class ExpressionScopeHandler {
    * Errors will be recorded to any ancestry MaybeAsyncArrowParameterDeclaration
    * scope until an Expression scope is seen.
    */
-  recordAsyncArrowParametersError(at: Position): void {
+  recordAsyncArrowParametersError(at: number): void {
     const { stack } = this;
-    let i = stack.length - 1;
-    let scope: ExpressionScope = stack[i];
-    while (scope.canBeArrowParameterDeclaration()) {
-      if (
-        scope.type === ExpressionScopeType.kMaybeAsyncArrowParameterDeclaration
-      ) {
-        scope.recordDeclarationError(Errors.AwaitBindingIdentifier, at);
+    for (let i = stack.length - 1; ; i--) {
+      const scope: ExpressionScope = stack[i];
+      if (scope.canBeArrowParameterDeclaration()) {
+        if (
+          scope.type ===
+          ExpressionScopeType.kMaybeAsyncArrowParameterDeclaration
+        ) {
+          scope.recordDeclarationError(Errors.AwaitBindingIdentifier, at);
+        }
+      } else if (!scope.isInitializer()) {
+        return;
       }
-      scope = stack[--i];
     }
   }
 
@@ -212,21 +239,19 @@ export default class ExpressionScopeHandler {
     const { stack } = this;
     const currentScope = stack[stack.length - 1];
     if (!currentScope.canBeArrowParameterDeclaration()) return;
-    currentScope.iterateErrors(([toParseError, loc]) => {
-      this.parser.raise(toParseError, loc);
+    currentScope.iterateErrors((toParseError, key) => {
+      this.parser.raise(toParseError, key);
       // iterate from parent scope
-      let i = stack.length - 2;
-      let scope = stack[i];
-      while (scope.canBeArrowParameterDeclaration()) {
-        scope.clearDeclarationError(loc.index);
-        scope = stack[--i];
+      for (let i = stack.length - 2; ; i--) {
+        const scope = stack[i];
+        if (scope.canBeArrowParameterDeclaration()) {
+          scope.clearDeclarationError(key);
+        } else if (!scope.isInitializer()) {
+          break;
+        }
       }
     });
   }
-}
-
-export function newParameterDeclarationScope() {
-  return new ExpressionScope(ExpressionScopeType.kParameterDeclaration);
 }
 
 export function newArrowHeadScope() {
@@ -241,6 +266,12 @@ export function newAsyncArrowScope() {
   );
 }
 
-export function newExpressionScope() {
-  return new ExpressionScope();
-}
+// The Expression, ParameterDeclaration and Initializer scopes hold no state, so
+// a single instance of each is shared
+export const sharedExpressionScope = new ExpressionScope();
+export const parameterDeclarationScope = new ExpressionScope(
+  ExpressionScopeType.kParameterDeclaration,
+);
+export const initializerScope = new ExpressionScope(
+  ExpressionScopeType.kInitializer,
+);

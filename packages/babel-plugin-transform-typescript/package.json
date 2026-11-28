@@ -1,6 +1,6 @@
 {
   "name": "@babel/plugin-transform-typescript",
-  "version": "7.27.1",
+  "version": "8.1.4",
   "description": "Transform TypeScript into ES.next",
   "repository": {
     "type": "git",
@@ -24,37 +24,20 @@
     "@babel/plugin-syntax-typescript": "workspace:^"
   },
   "peerDependencies": {
-    "@babel/core": "^7.0.0-0"
+    "@babel/core": "^8.0.0"
   },
   "devDependencies": {
     "@babel/core": "workspace:^",
     "@babel/helper-plugin-test-runner": "workspace:^",
+    "@babel/plugin-transform-block-scoping": "workspace:^",
     "@babel/traverse": "workspace:^",
     "@babel/types": "workspace:^"
   },
   "homepage": "https://babel.dev/docs/en/next/babel-plugin-transform-typescript",
   "engines": {
-    "node": ">=6.9.0"
+    "node": "^22.18.0 || >=24.11.0"
   },
   "author": "The Babel Team (https://babel.dev/team)",
-  "conditions": {
-    "BABEL_8_BREAKING": [
-      {
-        "engines": {
-          "node": "^20.19.0 || >=22.12.0"
-        }
-      },
-      {
-        "exports": null
-      }
-    ],
-    "USE_ESM": [
-      null,
-      {
-        "type": "commonjs"
-      }
-    ]
-  },
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",

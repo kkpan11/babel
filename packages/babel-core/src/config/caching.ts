@@ -13,18 +13,18 @@ export type { CacheConfigurator };
 
 export type SimpleCacheConfigurator = {
   (forever: boolean): void;
-  <T>(handler: () => T): T;
+  <T extends SimpleType>(handler: () => T): T;
 
   forever: () => void;
   never: () => void;
-  using: <T>(handler: () => T) => T;
-  invalidate: <T>(handler: () => T) => T;
+  using: <T extends SimpleType>(handler: () => T) => T;
+  invalidate: <T extends SimpleType>(handler: () => T) => T;
 };
 
-export type CacheEntry<ResultT, SideChannel> = Array<{
+type CacheEntry<ResultT, SideChannel> = {
   value: ResultT;
   valid: (channel: SideChannel) => Handler<boolean>;
-}>;
+}[];
 
 const synchronize = <ArgsT extends unknown[], ResultT>(
   gen: (...args: ArgsT) => Handler<ResultT>,
@@ -37,19 +37,19 @@ function* genTrue() {
   return true;
 }
 
-export function makeWeakCache<ArgT extends object, ResultT, SideChannel>(
+export function makeWeakCache<ArgT extends WeakKey, ResultT, SideChannel>(
   handler: (
     arg: ArgT,
     cache: CacheConfigurator<SideChannel>,
   ) => Handler<ResultT> | ResultT,
-): (arg: ArgT, data: SideChannel) => Handler<ResultT> {
+): (arg: ArgT, data?: SideChannel) => Handler<ResultT> {
   return makeCachedFunction<ArgT, ResultT, SideChannel>(WeakMap, handler);
 }
 
-export function makeWeakCacheSync<ArgT extends object, ResultT, SideChannel>(
+export function makeWeakCacheSync<ArgT extends WeakKey, ResultT, SideChannel>(
   handler: (arg: ArgT, cache?: CacheConfigurator<SideChannel>) => ResultT,
 ): (arg: ArgT, data?: SideChannel) => ResultT {
-  return synchronize<[ArgT, SideChannel], ResultT>(
+  return synchronize<[ArgT, SideChannel | undefined], ResultT>(
     makeWeakCache<ArgT, ResultT, SideChannel>(handler),
   );
 }
@@ -59,14 +59,14 @@ export function makeStrongCache<ArgT, ResultT, SideChannel>(
     arg: ArgT,
     cache: CacheConfigurator<SideChannel>,
   ) => Handler<ResultT> | ResultT,
-): (arg: ArgT, data: SideChannel) => Handler<ResultT> {
+): (arg: ArgT, data?: SideChannel) => Handler<ResultT> {
   return makeCachedFunction<ArgT, ResultT, SideChannel>(Map, handler);
 }
 
 export function makeStrongCacheSync<ArgT, ResultT, SideChannel>(
   handler: (arg: ArgT, cache?: CacheConfigurator<SideChannel>) => ResultT,
 ): (arg: ArgT, data?: SideChannel) => ResultT {
-  return synchronize<[ArgT, SideChannel], ResultT>(
+  return synchronize<[ArgT, SideChannel | undefined], ResultT>(
     makeStrongCache<ArgT, ResultT, SideChannel>(handler),
   );
 }
@@ -85,14 +85,18 @@ export function makeStrongCacheSync<ArgT, ResultT, SideChannel>(
  *       a. RETURN the cached value
  *   3. If there is a FinishLock associated to the current "arg" parameter representing a valid cache,
  *       a. Wait for that lock to be released
- *       b. RETURN the value associated with that lock
+ *       b. RETURN the value associated with that lock, or THROW the error associated with it
  *   5. Start executing the function to be cached
  *       a. If it pauses on a promise, then
  *           i. Let FinishLock be a new lock
  *          ii. Store FinishLock as associated to the current "arg" parameter
  *         iii. Wait for the function to finish executing
- *          iv. Release FinishLock
- *           v. Send the function result to anyone waiting on FinishLock
+ *          iv. If the function throws an error, then
+ *               - Remove FinishLock, so that the next call executes the function again
+ *               - Send the error to anyone waiting on FinishLock
+ *               - THROW the error, without storing it in the cache
+ *           v. Release FinishLock
+ *          vi. Send the function result to anyone waiting on FinishLock
  *   6. Store the result in the cache
  *   7. RETURN the result
  */
@@ -102,12 +106,15 @@ function makeCachedFunction<ArgT, ResultT, SideChannel>(
     arg: ArgT,
     cache: CacheConfigurator<SideChannel>,
   ) => Handler<ResultT> | ResultT,
-): (arg: ArgT, data: SideChannel) => Handler<ResultT> {
+): (arg: ArgT, data?: SideChannel) => Handler<ResultT> {
   const callCacheSync = new CallCache<ResultT>();
   const callCacheAsync = new CallCache<ResultT>();
   const futureCache = new CallCache<Lock<ResultT>>();
 
-  return function* cachedFunction(arg: ArgT, data: SideChannel) {
+  return function* cachedFunction(
+    arg: ArgT,
+    data: SideChannel = undefined as SideChannel,
+  ) {
     const asyncContext = yield* isAsync();
     const callCache = asyncContext ? callCacheAsync : callCacheSync;
 
@@ -128,16 +135,26 @@ function makeCachedFunction<ArgT, ResultT, SideChannel>(
     let value: ResultT;
 
     if (isIterableIterator(handlerResult)) {
-      value = yield* onFirstPause(handlerResult, () => {
-        finishLock = setupAsyncLocks(cache, futureCache, arg);
-      });
+      try {
+        value = yield* onFirstPause(handlerResult, () => {
+          finishLock = setupAsyncLocks(cache, futureCache, arg);
+        });
+      } catch (error) {
+        // Remove the lock so that the next call runs the handler again, and
+        // propagate the error to the callers that are waiting for the lock.
+        if (finishLock!) {
+          futureCache.delete(arg);
+          finishLock.reject(error);
+        }
+        throw error;
+      }
     } else {
       value = handlerResult;
     }
 
     updateFunctionCache(callCache, cache, arg, value);
 
-    if (finishLock) {
+    if (finishLock!) {
       futureCache.delete(arg);
       finishLock.release(value);
     }
@@ -246,9 +263,10 @@ class CacheConfigurator<SideChannel = void> {
 
   _configured: boolean = false;
 
-  _pairs: Array<
-    [cachedValue: unknown, handler: (data: SideChannel) => Handler<unknown>]
-  > = [];
+  _pairs: [
+    cachedValue: unknown,
+    handler: (data: SideChannel) => Handler<unknown>,
+  ][] = [];
 
   _data: SideChannel;
 
@@ -308,11 +326,10 @@ class CacheConfigurator<SideChannel = void> {
     );
 
     if (isThenable(key)) {
-      // @ts-expect-error todo(flow->ts): improve function return type annotation
       return key.then((key: unknown) => {
         this._pairs.push([key, fn]);
         return key;
-      });
+      }) as T;
     }
 
     this._pairs.push([key, fn]);
@@ -368,12 +385,7 @@ function makeSimpleConfigurator(
 // Types are limited here so that in the future these values can be used
 // as part of Babel's caching logic.
 export type SimpleType =
-  | string
-  | boolean
-  | number
-  | null
-  | void
-  | Promise<SimpleType>;
+  string | boolean | number | null | undefined | Promise<SimpleType>;
 export function assertSimpleType(value: unknown): SimpleType {
   if (isThenable(value)) {
     throw new Error(
@@ -395,24 +407,37 @@ export function assertSimpleType(value: unknown): SimpleType {
       "Cache keys must be either string, boolean, number, null, or undefined.",
     );
   }
-  // @ts-expect-error Type 'unknown' is not assignable to type 'SimpleType'. This can be removed
-  // when strictNullCheck is enabled
   return value;
 }
 
 class Lock<T> {
   released: boolean = false;
   promise: Promise<T>;
-  _resolve: (value: T) => void;
+  _resolve: undefined | ((value: T) => void);
+  _reject: undefined | ((error: unknown) => void);
 
   constructor() {
-    this.promise = new Promise(resolve => {
+    this.promise = new Promise((resolve, reject) => {
       this._resolve = resolve;
+      this._reject = reject;
     });
   }
 
   release(value: T) {
     this.released = true;
-    this._resolve(value);
+    this._resolve!(value);
+  }
+
+  reject(error: unknown) {
+    this.released = true;
+    // The call that owns the lock rethrows the error itself, and only the
+    // concurrent calls waiting for the lock (see getCachedValueOrWait) listen
+    // to this promise. When there are no such calls, rejecting it would be
+    // reported as an unhandled rejection, which crashes Node.js even though
+    // the error has already been handled by the caller. The no-op handler only
+    // marks the promise as handled: the waiting calls, if any, still receive
+    // the error through their own handlers.
+    this.promise.catch(() => {});
+    this._reject!(error);
   }
 }

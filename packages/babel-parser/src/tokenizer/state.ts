@@ -1,27 +1,13 @@
-import type { Options } from "../options.ts";
+import type { OptionsWithDefaults } from "../options.ts";
 import type { CommentWhitespace } from "../parser/comments";
 import { Position } from "../util/location.ts";
 
 import { types as ct, type TokContext } from "./context.ts";
 import { tt, type TokenType } from "./types.ts";
-import type { Errors } from "../parse-error.ts";
-import type { ParseError } from "../parse-error.ts";
+import type { Errors, ParseError } from "../parse-error.ts";
 
 export type DeferredStrictError =
-  | typeof Errors.StrictNumericEscape
-  | typeof Errors.StrictOctalLiteral;
-
-type TopicContextState = {
-  // When a topic binding has been currently established,
-  // then this is 1. Otherwise, it is 0. This is forwards compatible
-  // with a future plugin for multiple lexical topics.
-  maxNumOfResolvableTopics: number;
-  // When a topic binding has been currently established, and if that binding
-  // has been used as a topic reference `#`, then this is 0. Otherwise, it is
-  // `null`. This is forwards compatible with a future plugin for multiple
-  // lexical topics.
-  maxTopicIndex: null | 0;
-};
+  typeof Errors.StrictNumericEscape | typeof Errors.StrictOctalLiteral;
 
 export const enum LoopLabelKind {
   Loop = 1,
@@ -31,18 +17,18 @@ export const enum LoopLabelKind {
 declare const bit: import("../../../../scripts/babel-plugin-bit-decorator/types.d.ts").BitDecorator<State>;
 
 export default class State {
-  @bit.storage flags: number;
+  @bit.storage flags: number = 0;
 
   @bit accessor strict = false;
 
-  startIndex: number;
-  curLine: number;
-  lineStart: number;
+  startIndex!: number;
+  curLine!: number;
+  lineStart!: number;
 
   // And, if locations are used, the {line, column} object
   // corresponding to those offsets
-  startLoc: Position;
-  endLoc: Position;
+  startLoc!: Position;
+  endLoc!: Position;
 
   init({
     strictMode,
@@ -50,7 +36,7 @@ export default class State {
     startIndex,
     startLine,
     startColumn,
-  }: Options): void {
+  }: OptionsWithDefaults): void {
     this.strict =
       strictMode === false
         ? false
@@ -68,27 +54,34 @@ export default class State {
     );
   }
 
-  errors: ParseError<any>[] = [];
+  errors: ParseError[] = [];
 
-  // Used to signify the start of a potential arrow function
-  potentialArrowAt: number = -1;
-
-  // Used to signify the start of an expression which looks like a
-  // typed arrow function, but it isn't
-  // e.g. a ? (b) : c => d
-  //          ^
-  noArrowAt: number[] = [];
-
-  // Used to signify the start of an expression whose params, if it looks like
-  // an arrow function, shouldn't be converted to assignable nodes.
-  // This is used to defer the validation of typed arrow functions inside
-  // conditional expressions.
-  // e.g. a ? (b) : c => d
-  //          ^
+  // Flow source positions where an expression that looks like an arrow
+  // function should not have its parameters converted to assignable nodes.
+  // This defers validation of typed arrows inside conditional expressions.
+  // See also Parser#noArrowAt.
   noArrowParamsConversionAt: number[] = [];
 
+  // Source position of the innermost TypeScript arrow-return-type restriction.
+  // Scoped parser calls save and restore outer positions.
+  tsArrowReturnTypeRestrictionAt: number = -1;
+
+  // The end of the last token after which `/` or `/=` starts a regular
+  // expression although the parser has already parsed an expression before
+  // it: the `}` of an arrow function body or an argument-less `yield`.
+  // e.g. () => {}
+  //             ^
+  //      /=/
+  regExpAllowedAt: number = -1;
+
   // Flags to track
-  @bit accessor maybeInArrowParameters = false;
+
+  /**
+   * Track whether the current start is the start of an AssignmentExpression production.
+   * The ArrowFunctionExpression and AsyncArrowFunctionExpression productions can only be
+   * parsed if this is true.
+   */
+  @bit accessor canStartArrow = false;
   @bit accessor inType = false;
   @bit accessor noAnonFunctionType = false;
   @bit accessor hasFlowComment = false;
@@ -97,25 +90,19 @@ export default class State {
   @bit accessor inDisallowConditionalTypesContext = false;
 
   // For the Hack-style pipelines plugin
-  topicContext: TopicContextState = {
-    maxNumOfResolvableTopics: 0,
-    maxTopicIndex: null,
-  };
-
-  // For the F#-style pipelines plugin
-  @bit accessor soloAwait = false;
-  @bit accessor inFSharpPipelineDirectBody = false;
+  @bit accessor inHackPipelineBody = false;
+  @bit accessor seenTopicReference = false;
 
   // Labels in scope.
-  labels: Array<{
-    kind: LoopLabelKind;
+  labels: {
+    kind: LoopLabelKind | null;
     name?: string | null;
     statementStart?: number;
-  }> = [];
+  }[] = [];
 
   commentsLen = 0;
   // Comment attachment store
-  commentStack: Array<CommentWhitespace> = [];
+  commentStack: CommentWhitespace[] = [];
 
   // The current position of the tokenizer in the input.
   pos: number = 0;
@@ -133,13 +120,13 @@ export default class State {
 
   // Position information for the previous token
   // this is initialized when generating the second token.
-  lastTokEndLoc: Position = null;
+  lastTokEndLoc: Position | null = null;
   // this is initialized when generating the second token.
-  lastTokStartLoc: Position = null;
+  lastTokStartLoc: Position | null = null;
 
   // The context stack is used to track whether the apostrophe "`" starts
   // or ends a string template
-  context: Array<TokContext> = [ct.brace];
+  context: TokContext[] = [ct.brace];
 
   // Used to track whether a JSX element is allowed to form
   @bit accessor canStartJSXElement = true;
@@ -155,6 +142,10 @@ export default class State {
 
   @bit accessor hasTopLevelAwait = false;
 
+  // These flags describe the current TypeScript restriction only.
+  @bit accessor tsArrowReturnTypeAllowed = false;
+  @bit accessor tsGenericArrowParams = false;
+
   // This property is used to track the following errors
   // - StrictNumericEscape
   // - StrictOctalLiteral
@@ -163,7 +154,7 @@ export default class State {
 
   // todo(JLHwung): set strictErrors to null and avoid recording string errors
   // after a non-directive is parsed
-  strictErrors: Map<number, [DeferredStrictError, Position]> = new Map();
+  strictErrors = new Map<number, [DeferredStrictError, Position]>();
 
   // Tokens length in token store
   tokensLength: number = 0;
@@ -190,10 +181,9 @@ export default class State {
     state.startLoc = this.startLoc;
     state.endLoc = this.endLoc;
     state.errors = this.errors.slice();
-    state.potentialArrowAt = this.potentialArrowAt;
-    state.noArrowAt = this.noArrowAt.slice();
     state.noArrowParamsConversionAt = this.noArrowParamsConversionAt.slice();
-    state.topicContext = this.topicContext;
+    state.tsArrowReturnTypeRestrictionAt = this.tsArrowReturnTypeRestrictionAt;
+    state.regExpAllowedAt = this.regExpAllowedAt;
     state.labels = this.labels.slice();
     state.commentsLen = this.commentsLen;
     state.commentStack = this.commentStack.slice();
@@ -221,12 +211,14 @@ export type LookaheadState = {
   end: number;
   context: TokContext[];
   startLoc: Position;
-  lastTokEndLoc: Position;
+  lastTokEndLoc: Position | null;
   curLine: number;
   lineStart: number;
   curPosition: State["curPosition"];
   /* Used only in readToken_mult_modulo */
   inType: boolean;
+  /* Used only in readNumber */
+  strict: boolean;
   // These boolean properties are not initialized in createLookaheadState()
   // instead they will only be set by the tokenizer
   containsEsc?: boolean;

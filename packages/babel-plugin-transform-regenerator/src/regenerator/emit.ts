@@ -1,11 +1,10 @@
-/* eslint-disable no-case-declarations */
+/* eslint-disable no-case-declarations, @typescript-eslint/no-unnecessary-type-assertion */
 import assert from "node:assert";
 import * as leap from "./leap.ts";
 import * as meta from "./meta.ts";
-import * as util from "./util.ts";
 
-import type { NodePath, PluginPass, Visitor, Scope } from "@babel/core";
-import { types as t } from "@babel/core";
+import type { NodePath, PluginPass, Scope } from "@babel/core";
+import { types as t, traverse } from "@babel/core";
 
 // From packages/babel-helpers/src/helpers/regenerator.ts
 const enum OperatorType {
@@ -42,21 +41,25 @@ function getDeclError(node: t.Node) {
   );
 }
 
-const catchParamVisitor: Visitor = {
-  Identifier: function (path, state: any) {
-    if (path.node.name === state.catchParamName && util.isReference(path)) {
-      util.replaceWithOrRemove(path, state.getSafeParam());
-    }
+// Finds a `yield` or `await` of the function being compiled, so it does not
+// look into nested functions, except the computed keys of methods.
+const yieldOrAwaitVisitor = traverse.visitors.environmentVisitor<{
+  found: boolean;
+}>({
+  ArrowFunctionExpression(path) {
+    path.skip();
   },
+  "YieldExpression|AwaitExpression"(path, state) {
+    state.found = true;
+    path.stop();
+  },
+});
 
-  Scope: function (path, state: any) {
-    if (path.scope.hasOwnBinding(state.catchParamName)) {
-      // Don't descend into nested scopes that shadow the catch
-      // parameter with their own declarations.
-      path.skip();
-    }
-  },
-};
+function containsYieldOrAwait(path: NodePath) {
+  const state = { found: false };
+  path.traverse(yieldOrAwaitVisitor, state);
+  return state.found;
+}
 
 export class Emitter {
   nextTempId: number;
@@ -215,15 +218,7 @@ export class Emitter {
   // Emits code for an unconditional jump to the given location, even if the
   // exact value of the location is not yet known.
   jump(toLoc: t.Expression) {
-    this.emitAssign(
-      this.contextProperty(
-        process.env.BABEL_8_BREAKING ||
-          util.newHelpersAvailable(this.pluginPass)
-          ? "n"
-          : "next",
-      ),
-      toLoc,
-    );
+    this.emitAssign(this.contextProperty("n"), toLoc);
     this.emit(t.breakStatement());
   }
 
@@ -233,15 +228,7 @@ export class Emitter {
       t.ifStatement(
         test,
         t.blockStatement([
-          this.assign(
-            this.contextProperty(
-              process.env.BABEL_8_BREAKING ||
-                util.newHelpersAvailable(this.pluginPass)
-                ? "n"
-                : "next",
-            ),
-            toLoc,
-          ),
+          this.assign(this.contextProperty("n"), toLoc),
           t.breakStatement(),
         ]),
       ),
@@ -262,15 +249,7 @@ export class Emitter {
       t.ifStatement(
         negatedTest,
         t.blockStatement([
-          this.assign(
-            this.contextProperty(
-              process.env.BABEL_8_BREAKING ||
-                util.newHelpersAvailable(this.pluginPass)
-                ? "n"
-                : "next",
-            ),
-            toLoc,
-          ),
+          this.assign(this.contextProperty("n"), toLoc),
           t.breakStatement(),
         ]),
       ),
@@ -325,7 +304,7 @@ export class Emitter {
     self.listing.forEach(function (stmt, i) {
       if (self.marked[i]) {
         cases.push(
-          t.switchCase(t.numericLiteral(self.indexMap.get(i)), (current = [])),
+          t.switchCase(t.numericLiteral(self.indexMap.get(i)!), (current = [])),
         );
         alreadyEnded = false;
       }
@@ -341,34 +320,16 @@ export class Emitter {
     this.finalLoc.value = this.getIndex();
 
     if (
-      process.env.BABEL_8_BREAKING ||
-      util.newHelpersAvailable(this.pluginPass)
+      this.lastReferenceIndex === this.index ||
+      !this.returns.has(this.listing.length)
     ) {
-      if (
-        this.lastReferenceIndex === this.index ||
-        !this.returns.has(this.listing.length)
-      ) {
-        cases.push(
-          t.switchCase(this.finalLoc, [
-            t.returnStatement(
-              t.callExpression(this.contextProperty("a"), [
-                t.numericLiteral(OperatorType.Return),
-              ]),
-            ),
-          ]),
-        );
-      }
-    } else {
       cases.push(
         t.switchCase(this.finalLoc, [
-          // Intentionally fall through to the "end" case...
-        ]),
-
-        // So that the runtime can jump to the final location without having
-        // to know its offset, we provide the "end" case as a synonym.
-        t.switchCase(t.stringLiteral("end"), [
-          // This will check/clear both context.thrown and context.rval.
-          t.returnStatement(t.callExpression(this.contextProperty("stop"), [])),
+          t.returnStatement(
+            t.callExpression(this.contextProperty("a"), [
+              t.numericLiteral(OperatorType.Return),
+            ]),
+          ),
         ]),
       );
     }
@@ -376,14 +337,14 @@ export class Emitter {
     return t.whileStatement(
       t.numericLiteral(1),
       t.switchStatement(
-        process.env.BABEL_8_BREAKING ||
-          util.newHelpersAvailable(this.pluginPass)
+        this.tryEntries.length === 0
           ? this.contextProperty("n")
           : t.assignmentExpression(
               "=",
-              this.contextProperty("prev"),
-              this.contextProperty("next"),
+              this.contextProperty("p"),
+              this.contextProperty("n"),
             ),
+
         cases,
       ),
     );
@@ -421,12 +382,9 @@ export class Emitter {
         return t.arrayExpression(locs.map(loc => loc && t.cloneNode(loc)));
       }),
     );
-    if (
-      process.env.BABEL_8_BREAKING ||
-      util.newHelpersAvailable(this.pluginPass)
-    ) {
-      arrayExpression.elements.reverse();
-    }
+
+    arrayExpression.elements.reverse();
+
     return arrayExpression;
   }
 
@@ -464,11 +422,14 @@ export class Emitter {
     }
   }
 
-  explodeStatement(path: NodePath<t.Statement>, labelId: t.Identifier = null) {
+  explodeStatement(
+    path: NodePath<t.Statement>,
+    labelId: t.Identifier | null = null,
+  ) {
     const stmt = path.node;
     const self = this;
     let before: t.NumericLiteral,
-      after: t.NumericLiteral,
+      after: t.NumericLiteral | null,
       head: t.NumericLiteral;
 
     // Explode BlockStatement nodes even if they do not contain a yield,
@@ -572,13 +533,16 @@ export class Emitter {
         if (path.node.init) {
           // We pass true here to indicate that if stmt.init is an expression
           // then we do not care about its result.
-          self.explode(path.get("init"), true);
+          self.explode(path.get("init") as NodePath<t.Expression>, true);
         }
 
         self.mark(head);
 
         if (path.node.test) {
-          self.jumpIfNot(self.explodeExpression(path.get("test")), after);
+          self.jumpIfNot(
+            self.explodeExpression(path.get("test") as NodePath<t.Expression>),
+            after,
+          );
         } else {
           // No test means continue unconditionally.
         }
@@ -595,7 +559,7 @@ export class Emitter {
         if (path.node.update) {
           // We pass true here to indicate that if stmt.update is an
           // expression then we do not care about its result.
-          self.explode(path.get("update"), true);
+          self.explode(path.get("update") as NodePath<t.Expression>, true);
         }
 
         self.jump(head);
@@ -614,12 +578,7 @@ export class Emitter {
 
         const keyIterNextFn = self.makeTempVar();
 
-        const helper =
-          process.env.BABEL_8_BREAKING ||
-          util.newHelpersAvailable(this.pluginPass)
-            ? this.pluginPass.addHelper("regeneratorKeys")
-            : util.runtimeProperty(this.pluginPass, "keys");
-
+        const helper = this.pluginPass.addHelper("regeneratorKeys");
         self.emitAssign(
           keyIterNextFn,
           t.callExpression(helper, [self.explodeExpression(path.get("right"))]),
@@ -710,7 +669,7 @@ export class Emitter {
         }
 
         const discriminant = path.get("discriminant");
-        util.replaceWithOrRemove(discriminant, condition);
+        discriminant.replaceWith(condition);
         self.jump(self.explodeExpression(discriminant));
 
         self.leapManager.withEntry(new leap.SwitchEntry(after), function () {
@@ -746,7 +705,7 @@ export class Emitter {
         if (elseLoc) {
           self.jump(after);
           self.mark(elseLoc);
-          self.explodeStatement(path.get("alternate"));
+          self.explodeStatement(path.get("alternate") as NodePath<t.Statement>);
         }
 
         self.mark(after);
@@ -756,7 +715,9 @@ export class Emitter {
       case "ReturnStatement":
         self.emitAbruptCompletion({
           type: OperatorType.Return,
-          value: self.explodeExpression(path.get("argument")),
+          value: self.explodeExpression(
+            path.get("argument") as NodePath<t.Expression>,
+          ),
         });
 
         break;
@@ -804,52 +765,50 @@ export class Emitter {
             } else {
               // If there is no finally block, then we need to jump over the
               // catch block to the fall-through location.
-              self.jump(after);
+              self.jump(after!);
             }
 
             self.updateContextPrevLoc(self.mark(catchLoc));
 
-            const bodyPath = path.get("handler.body");
-            const safeParam = self.makeTempVar();
-            if (
-              process.env.BABEL_8_BREAKING ||
-              util.newHelpersAvailable(this.pluginPass)
-            ) {
-              this.emitAssign(safeParam, self.contextProperty("v"));
-            } else {
-              self.clearPendingException(tryEntry.firstLoc, safeParam);
+            const handlerPath = path.get("handler") as NodePath<t.CatchClause>;
+            const paramPath = handlerPath.get("param");
+
+            if (paramPath.node) {
+              if (containsYieldOrAwait(paramPath)) {
+                throw paramPath.buildCodeFrameError(
+                  "`yield` or `await` in a `catch` parameter is not supported by the regenerator transform. " +
+                    "Please add @babel/plugin-transform-destructuring to your Babel config.",
+                );
+              }
+              // The catch clause becomes part of the function body, so its
+              // bindings become function-level temporaries.
+              for (const name of Object.keys(
+                paramPath.getBindingIdentifiers(),
+              )) {
+                handlerPath.scope.rename(name, self.makeTempVar().name);
+              }
+              self.emitAssign(paramPath.node, self.contextProperty("v"));
             }
 
-            bodyPath.traverse(catchParamVisitor, {
-              getSafeParam: () => t.cloneNode(safeParam),
-              catchParamName:
-                // @ts-expect-error Assuming `handler.param` is `t.Identifier`
-                handler.param.name,
-            });
-
-            self.leapManager.withEntry(catchEntry, function () {
-              self.explodeStatement(bodyPath);
+            self.leapManager.withEntry(catchEntry!, function () {
+              self.explodeStatement(handlerPath.get("body"));
             });
           }
 
           if (finallyLoc) {
             self.updateContextPrevLoc(self.mark(finallyLoc));
 
-            self.leapManager.withEntry(finallyEntry, function () {
-              self.explodeStatement(path.get("finalizer"));
+            self.leapManager.withEntry(finallyEntry!, function () {
+              self.explodeStatement(
+                path.get("finalizer") as NodePath<t.BlockStatement>,
+              );
             });
 
             self.emit(
               t.returnStatement(
-                t.callExpression(
-                  self.contextProperty(
-                    process.env.BABEL_8_BREAKING ||
-                      util.newHelpersAvailable(this.pluginPass)
-                      ? "f"
-                      : "finish",
-                  ),
-                  [finallyEntry.firstLoc],
-                ),
+                t.callExpression(self.contextProperty("f"), [
+                  finallyEntry!.firstLoc,
+                ]),
               ),
             );
           }
@@ -879,11 +838,7 @@ export class Emitter {
 
   emitAbruptCompletion(record: AbruptCompletion) {
     const abruptArgs: [t.NumericLiteral | t.StringLiteral, t.Expression?] = [
-      process.env.BABEL_8_BREAKING || util.newHelpersAvailable(this.pluginPass)
-        ? t.numericLiteral(record.type)
-        : t.stringLiteral(
-            record.type === OperatorType.Jump ? "continue" : "return",
-          ),
+      t.numericLiteral(record.type),
     ];
 
     if (record.type === OperatorType.Jump) {
@@ -899,13 +854,8 @@ export class Emitter {
     this.emit(
       t.returnStatement(
         t.callExpression(
-          this.contextProperty(
-            process.env.BABEL_8_BREAKING ||
-              util.newHelpersAvailable(this.pluginPass)
-              ? "a"
-              : "abrupt",
-          ),
-          abruptArgs,
+          this.contextProperty("a"),
+          abruptArgs as t.Expression[],
         ),
       ),
     );
@@ -955,15 +905,7 @@ export class Emitter {
     // Make sure context.prev is up to date in case we fell into this try
     // statement without jumping to it. TODO Consider avoiding this
     // assignment when we know control must have jumped here.
-    this.emitAssign(
-      this.contextProperty(
-        process.env.BABEL_8_BREAKING ||
-          util.newHelpersAvailable(this.pluginPass)
-          ? "p"
-          : "prev",
-      ),
-      loc,
-    );
+    this.emitAssign(this.contextProperty("p"), loc);
   }
 
   // In order to save the rest of explodeExpression from a combinatorial
@@ -976,7 +918,7 @@ export class Emitter {
   // control the precise order in which the generated code realizes the
   // side effects of those subexpressions.
   explodeViaTempVar(
-    tempVar: t.MemberExpression | t.Identifier,
+    tempVar: t.MemberExpression | t.Identifier | null,
     childPath: NodePath<t.Expression>,
     hasLeapingChildren: boolean,
     ignoreChildResult?: boolean,
@@ -1038,7 +980,7 @@ export class Emitter {
     // break statement), then any sibling subexpressions will almost
     // certainly have to be exploded in order to maintain the order of their
     // side effects relative to the leaping child(ren).
-    const hasLeapingChildren = meta.containsLeap.onlyChildren(expr);
+    const hasLeapingChildren = meta.containsLeapInChildren(expr);
 
     // If ignoreResult is true, then we must take full responsibility for
     // emitting the expression with all its side effects, and we should not
@@ -1069,14 +1011,18 @@ export class Emitter {
         let newCallee;
         let newArgs;
 
-        const hasLeapingArgs = argsPath.some(argPath =>
-          meta.containsLeap(argPath.node),
-        );
+        let lastLeapingArgIndex = argsPath.length - 1;
+        while (
+          lastLeapingArgIndex >= 0 &&
+          !meta.containsLeap(argsPath[lastLeapingArgIndex].node)
+        ) {
+          lastLeapingArgIndex--;
+        }
 
         let injectFirstArg = null;
 
         if (t.isMemberExpression(calleePath.node)) {
-          if (hasLeapingArgs) {
+          if (lastLeapingArgIndex !== -1) {
             // If the arguments of the CallExpression contained any yield
             // expressions, then we need to be sure to evaluate the callee
             // before evaluating the arguments, but if the callee was a member
@@ -1101,12 +1047,17 @@ export class Emitter {
 
             injectFirstArg = newObject;
 
-            newCallee = t.memberExpression(
+            const newMethod = self.emitAssign(
+              self.makeTempVar(),
               t.memberExpression(
                 t.cloneNode(newObject),
                 newProperty,
                 calleePath.node.computed,
               ),
+            );
+
+            newCallee = t.memberExpression(
+              newMethod,
               t.identifier("call"),
               false,
             );
@@ -1138,13 +1089,15 @@ export class Emitter {
           }
         }
 
-        if (hasLeapingArgs) {
-          newArgs = argsPath.map(argPath =>
-            self.explodeViaTempVar(
-              null,
-              argPath as NodePath<t.Expression>,
-              hasLeapingChildren,
-            ),
+        if (lastLeapingArgIndex !== -1) {
+          newArgs = argsPath.map((argPath, index) =>
+            index >= lastLeapingArgIndex
+              ? self.explodeExpression(argPath as NodePath<t.Expression>) // Don't explode leaping children.
+              : self.explodeViaTempVar(
+                  null,
+                  argPath as NodePath<t.Expression>,
+                  hasLeapingChildren,
+                ),
           );
           if (injectFirstArg) newArgs.unshift(injectFirstArg);
 
@@ -1173,18 +1126,47 @@ export class Emitter {
         return finish(
           t.objectExpression(
             path.get("properties").map(function (propPath) {
+              if (propPath.isSpreadElement()) {
+                return t.spreadElement(
+                  self.explodeViaTempVar(
+                    null,
+                    propPath.get("argument"),
+                    hasLeapingChildren,
+                  ),
+                );
+              }
+
+              let { key, computed } = propPath.node;
+              if (computed) {
+                key = self.explodeViaTempVar(
+                  null,
+                  propPath.get("key") as NodePath<t.Expression>,
+                  hasLeapingChildren,
+                );
+              }
+
               if (propPath.isObjectProperty()) {
+                if (
+                  propPath.node.shorthand &&
+                  t.isIdentifier(key, { name: "__proto__" })
+                ) {
+                  // `{ __proto__ }` defines a property, but
+                  // `{ __proto__: value }` sets the prototype.
+                  key = t.stringLiteral("__proto__");
+                  computed = true;
+                }
                 return t.objectProperty(
-                  propPath.node.key,
+                  key,
                   self.explodeViaTempVar(
                     null,
                     // @ts-expect-error `ArrayPattern` cannot cast to `ArrayExpression`
                     propPath.get("value"),
                     hasLeapingChildren,
                   ),
-                  propPath.node.computed,
+                  computed,
                 );
               } else {
+                propPath.node.key = key as t.Expression;
                 return propPath.node;
               }
             }),
@@ -1228,9 +1210,16 @@ export class Emitter {
           }
         });
 
-        return result;
+        return result!;
 
       case "LogicalExpression":
+        if (path.node.operator === "??") {
+          throw path.buildCodeFrameError(
+            "`??` containing `yield` or `await` is not supported by the regenerator transform. " +
+              "Please add @babel/plugin-transform-nullish-coalescing-operator to your Babel config.",
+          );
+        }
+
         after = this.loc();
 
         if (!ignoreResult) {
@@ -1238,20 +1227,22 @@ export class Emitter {
         }
 
         const left = self.explodeViaTempVar(
-          result,
+          result!,
           path.get("left"),
           hasLeapingChildren,
         );
 
+        // `left` is a temporary variable, which can also be `result`, or a
+        // literal, so it must be cloned.
         if (path.node.operator === "&&") {
-          self.jumpIfNot(left, after);
+          self.jumpIfNot(t.cloneNode(left), after);
         } else {
           assert.strictEqual(path.node.operator, "||");
-          self.jumpIf(left, after);
+          self.jumpIf(t.cloneNode(left), after);
         }
 
         self.explodeViaTempVar(
-          result,
+          result!,
           path.get("right"),
           hasLeapingChildren,
           ignoreResult,
@@ -1259,7 +1250,7 @@ export class Emitter {
 
         self.mark(after);
 
-        return result;
+        return result!;
 
       case "ConditionalExpression":
         const elseLoc = this.loc();
@@ -1273,7 +1264,7 @@ export class Emitter {
         }
 
         self.explodeViaTempVar(
-          result,
+          result!,
           path.get("consequent"),
           hasLeapingChildren,
           ignoreResult,
@@ -1282,7 +1273,7 @@ export class Emitter {
 
         self.mark(elseLoc);
         self.explodeViaTempVar(
-          result,
+          result!,
           path.get("alternate"),
           hasLeapingChildren,
           ignoreResult,
@@ -1290,7 +1281,7 @@ export class Emitter {
 
         self.mark(after);
 
-        return result;
+        return result!;
 
       case "UnaryExpression":
         return finish(
@@ -1331,6 +1322,19 @@ export class Emitter {
           );
         }
 
+        if (
+          path.node.operator === "||=" ||
+          path.node.operator === "&&=" ||
+          path.node.operator === "??="
+        ) {
+          // Compiling it like `+=` would always evaluate the right-hand side
+          // and assign the left-hand side.
+          throw path.buildCodeFrameError(
+            `\`${path.node.operator}\` containing \`yield\` or \`await\` is not supported by the regenerator transform. ` +
+              "Please add @babel/plugin-transform-logical-assignment-operators to your Babel config.",
+          );
+        }
+
         // @ts-expect-error `ArrayPattern` cannot cast to `ArrayExpression`
         const lhs = self.explodeExpression(path.get("left"));
         const temp = self.emitAssign(self.makeTempVar(), lhs);
@@ -1365,8 +1369,7 @@ export class Emitter {
           t.updateExpression(
             path.node.operator,
             self.explodeExpression(path.get("argument")) as
-              | t.Identifier
-              | t.MemberExpression,
+              t.Identifier | t.MemberExpression,
             path.node.prefix,
           ),
         );
@@ -1374,56 +1377,29 @@ export class Emitter {
       case "YieldExpression":
         after = this.loc();
         const arg =
-          path.node.argument && self.explodeExpression(path.get("argument"));
+          path.node.argument &&
+          self.explodeExpression(
+            path.get("argument") as NodePath<t.Expression>,
+          );
 
         if (arg && path.node.delegate) {
-          if (
-            process.env.BABEL_8_BREAKING ||
-            util.newHelpersAvailable(this.pluginPass)
-          ) {
-            const ret = t.returnStatement(
-              t.callExpression(self.contextProperty("d"), [
-                t.callExpression(
-                  this.pluginPass.addHelper("regeneratorValues"),
-                  [arg],
-                ),
-                after,
-              ]),
-            );
-            ret.loc = expr.loc;
-
-            self.emit(ret);
-            self.mark(after);
-
-            return self.contextProperty("v");
-          } else {
-            const result = self.makeContextTempVar();
-
-            const ret = t.returnStatement(
-              t.callExpression(self.contextProperty("delegateYield"), [
+          const ret = t.returnStatement(
+            t.callExpression(self.contextProperty("d"), [
+              t.callExpression(this.pluginPass.addHelper("regeneratorValues"), [
                 arg,
-                t.stringLiteral((result.property as t.Identifier).name),
-                after,
               ]),
-            );
-            ret.loc = expr.loc;
+              after,
+            ]),
+          );
+          ret.loc = expr.loc;
 
-            self.emit(ret);
-            self.mark(after);
+          self.emit(ret);
+          self.mark(after);
 
-            return result;
-          }
+          return self.contextProperty("v");
         }
 
-        self.emitAssign(
-          self.contextProperty(
-            process.env.BABEL_8_BREAKING ||
-              util.newHelpersAvailable(this.pluginPass)
-              ? "n"
-              : "next",
-          ),
-          after,
-        );
+        self.emitAssign(self.contextProperty("n"), after);
 
         const ret = t.returnStatement(t.cloneNode(arg) || null);
         // Preserve the `yield` location so that source mappings for the statements
@@ -1432,12 +1408,27 @@ export class Emitter {
         self.emit(ret);
         self.mark(after);
 
-        return self.contextProperty(
-          process.env.BABEL_8_BREAKING ||
-            util.newHelpersAvailable(self.pluginPass)
-            ? "v"
-            : "sent",
+        return self.contextProperty("v");
+
+      case "AwaitExpression": {
+        after = this.loc();
+        const arg = self.explodeExpression(path.get("argument"));
+
+        self.emitAssign(self.contextProperty("n"), after);
+
+        const helper = self.pluginPass.addHelper("awaitAsyncGenerator");
+
+        const ret = t.returnStatement(
+          t.cloneNode(t.callExpression(helper, [arg])) || null,
         );
+        // Preserve the `yield` location so that source mappings for the statements
+        // link back to the yield properly.
+        ret.loc = expr.loc;
+        self.emit(ret);
+        self.mark(after);
+
+        return self.contextProperty("v");
+      }
 
       case "ClassExpression":
         return finish(self.explodeClass(path));
@@ -1463,11 +1454,11 @@ export class Emitter {
     });
 
     const hasLeapingChildren = explodingChildren.some(child =>
-      meta.containsLeap(child),
+      meta.containsLeap(child.node!),
     );
 
     for (let i = 0; i < explodingChildren.length; i++) {
-      const child = explodingChildren[i];
+      const child = explodingChildren[i] as NodePath<t.Expression>;
       const isLast = i === explodingChildren.length - 1;
 
       if (isLast) {

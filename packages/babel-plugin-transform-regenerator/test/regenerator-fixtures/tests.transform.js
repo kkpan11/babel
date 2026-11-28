@@ -10,7 +10,6 @@ var recast = require("recast");
 var v8 = require("v8");
 var types = recast.types;
 var n = types.namedTypes;
-var expect = require("expect");
 
 function transform(ast) {
   return require("@babel/core")
@@ -30,7 +29,7 @@ function compile(code) {
   });
 }
 
-var UglifyJS = require("uglify-js");
+var Terser = require("terser");
 
 describe("_blockHoist nodes", function () {
   it("should be hoisted to the outer body", async function () {
@@ -82,8 +81,8 @@ describe("_blockHoist nodes", function () {
   });
 });
 
-describe("uglifyjs dead code removal", function () {
-  function uglifyAndParse(file1, file2) {
+describe("terser dead code removal", function () {
+  async function minifyAndParse(file1, file2) {
     var code = {
       "file1.js": file1,
       "file2.js": file2,
@@ -93,14 +92,14 @@ describe("uglifyjs dead code removal", function () {
       toplevel: true,
       // don't mangle function or variable names so we can find them
       mangle: false,
-      output: {
+      format: {
         // make it easier to parse the output
         beautify: true,
       },
     };
 
-    // uglify our code
-    var result = UglifyJS.minify(code, options);
+    // minify our code
+    var result = await Terser.minify(code, options);
 
     // parse and return the output
     return recast.parse(result.code, {
@@ -116,7 +115,7 @@ describe("uglifyjs dead code removal", function () {
     ).code;
     var file2 = (await compile("console.log(foo());")).code;
 
-    var ast = uglifyAndParse(file1, file2);
+    var ast = await minifyAndParse(file1, file2);
 
     // the results should have a single variable declaration
     var variableDeclarations = ast.program.body.filter(function (b) {
@@ -137,7 +136,7 @@ describe("uglifyjs dead code removal", function () {
 
     var file2 = (await compile("console.log(foo());")).code;
 
-    var ast = uglifyAndParse(file1, file2);
+    var ast = await minifyAndParse(file1, file2);
 
     // the results should have our foo() function
     assert.ok(
@@ -168,7 +167,7 @@ describe("uglifyjs dead code removal", function () {
   });
 });
 
-context("functions", function () {
+describe("functions", function () {
   function marksCorrectly(marked, varName) {
     // marked should be a VariableDeclarator
     n.VariableDeclarator.assert(marked);

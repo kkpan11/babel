@@ -1,4 +1,5 @@
 "use strict";
 
-var _a = babelHelpers.interopRequireDefault(require("a"));
-_a.default.preview.apply(_a.default, babelHelpers.toConsumableArray(c));
+var _a2 = babelHelpers.interopRequireDefault(require("a"));
+var _a;
+babelHelpers.callSpread((_a = _a2.default).preview, _a, babelHelpers.toConsumableArray(c));

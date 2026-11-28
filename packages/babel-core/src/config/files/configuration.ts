@@ -1,10 +1,14 @@
-import buildDebug from "debug";
+import { createDebug } from "obug";
 import nodeFs from "node:fs";
 import path from "node:path";
 import json5 from "json5";
 import gensync from "gensync";
 import type { Handler } from "gensync";
-import { makeWeakCache, makeWeakCacheSync } from "../caching.ts";
+import {
+  makeStrongCache,
+  makeWeakCache,
+  makeWeakCacheSync,
+} from "../caching.ts";
 import type { CacheConfigurator } from "../caching.ts";
 import { makeConfigAPI } from "../helpers/config-api.ts";
 import type { ConfigAPI } from "../helpers/config-api.ts";
@@ -22,7 +26,7 @@ import { endHiddenCallStack } from "../../errors/rewrite-stack-trace.ts";
 import { isAsync } from "../../gensync-utils/async.ts";
 const require = createRequire(import.meta.url);
 
-const debug = buildDebug("babel:config:loading:files:configuration");
+const debug = createDebug("babel:config:loading:files:configuration");
 
 export const ROOT_CONFIG_FILENAMES = [
   "babel.config.js",
@@ -30,6 +34,8 @@ export const ROOT_CONFIG_FILENAMES = [
   "babel.config.mjs",
   "babel.config.json",
   "babel.config.cts",
+  "babel.config.ts",
+  "babel.config.mts",
 ];
 const RELATIVE_CONFIG_FILENAMES = [
   ".babelrc",
@@ -58,10 +64,27 @@ const runConfig = makeWeakCache(function* runConfig(
   yield* [];
 
   return {
-    options: endHiddenCallStack(options as any as (api: ConfigAPI) => unknown)(
+    options: endHiddenCallStack(options as any as (api: ConfigAPI) => any)(
       makeConfigAPI(cache),
     ),
     cacheNeedsConfiguration: !cache.configured(),
+  };
+});
+
+const loadConfigModule = makeStrongCache(function* loadConfigModule(
+  filepath: string,
+  cache: CacheConfigurator<void>,
+) {
+  const exists = cache.invalidate(() => nodeFs.existsSync(filepath));
+  if (!exists) return null;
+
+  return {
+    value: yield* loadCodeDefault(
+      filepath,
+      (yield* isAsync()) ? "auto" : "require",
+      "You appear to be using a configuration file that contains top-level " +
+        "await, which is only supported when running Babel asynchronously.",
+    ),
   };
 });
 
@@ -69,19 +92,11 @@ function* readConfigCode(
   filepath: string,
   data: ConfigCacheData,
 ): Handler<ConfigFile | null> {
-  if (!nodeFs.existsSync(filepath)) return null;
-
-  let options = yield* loadCodeDefault(
-    filepath,
-    (yield* isAsync()) ? "auto" : "require",
-    "You appear to be using a native ECMAScript module configuration " +
-      "file, which is only supported when running Babel asynchronously " +
-      "or when using the Node.js `--experimental-require-module` flag.",
-    "You appear to be using a configuration file that contains top-level " +
-      "await, which is only supported when running Babel asynchronously.",
-  );
+  const loaded = yield* loadConfigModule(filepath);
+  if (loaded === null) return null;
 
   let cacheNeedsConfiguration = false;
+  let options = loaded.value;
   if (typeof options === "function") {
     ({ options, cacheNeedsConfiguration } = yield* runConfig(options, data));
   }
@@ -93,10 +108,9 @@ function* readConfigCode(
     );
   }
 
-  // @ts-expect-error todo(flow->ts)
-  if (typeof options.then === "function") {
-    // @ts-expect-error We use ?. in case options is a thenable but not a promise
-    options.catch?.(() => {});
+  if (typeof (options as any).then === "function") {
+    // We use ?. in case options is a thenable but not a promise
+    (options as any).catch?.(() => {});
     throw new ConfigError(
       `You appear to be using an async configuration, ` +
         `which your current version of Babel does not support. ` +
@@ -164,7 +178,7 @@ const readConfigJSON5 = makeStaticFileCache((filepath, content): ConfigFile => {
     options = json5.parse(content);
   } catch (err) {
     throw new ConfigError(
-      `Error while parsing config - ${err.message}`,
+      `Error while parsing config - ${(err as Error).message}`,
       filepath,
     );
   }
@@ -191,13 +205,11 @@ const readIgnoreConfig = makeStaticFileCache((filepath, content) => {
   const ignoreDir = path.dirname(filepath);
   const ignorePatterns = content
     .split("\n")
-    .map(line =>
-      line.replace(process.env.BABEL_8_BREAKING ? /^#.*$/ : /#.*$/, "").trim(),
-    )
+    .map(line => line.replace(/^#.*$/, "").trim())
     .filter(Boolean);
 
   for (const pattern of ignorePatterns) {
-    if (pattern[0] === "!") {
+    if (pattern.startsWith("!")) {
       throw new ConfigError(
         `Negation of file paths is not supported.`,
         filepath,
@@ -284,7 +296,12 @@ function* loadOneConfig(
 ): Handler<ConfigFile | null> {
   const configs = yield* gensync.all(
     names.map(filename =>
-      readConfig(path.join(dirname, filename), envName, caller),
+      readConfig(
+        path.join(dirname, filename),
+        path.extname(filename),
+        envName,
+        caller,
+      ),
     ),
   );
   const config = configs.reduce((previousConfig: ConfigFile | null, config) => {
@@ -312,9 +329,18 @@ export function* loadConfig(
   envName: string,
   caller: CallerMetadata | undefined,
 ): Handler<ConfigFile> {
-  const filepath = require.resolve(name, { paths: [dirname] });
+  // `paths` is ignored when resolving an absolute path, but Node.js still
+  // computes the node_modules lookup paths for it, which is slow.
+  const filepath = path.isAbsolute(name)
+    ? require.resolve(name)
+    : require.resolve(name, { paths: [dirname] });
 
-  const conf = yield* readConfig(filepath, envName, caller);
+  const conf = yield* readConfig(
+    filepath,
+    path.extname(filepath),
+    envName,
+    caller,
+  );
   if (!conf) {
     throw new ConfigError(
       `Config file contains no configuration data`,
@@ -332,11 +358,11 @@ export function* loadConfig(
  */
 function readConfig(
   filepath: string,
+  extName: string,
   envName: string,
   caller: CallerMetadata | undefined,
 ): Handler<ConfigFile | null> {
-  const ext = path.extname(filepath);
-  switch (ext) {
+  switch (extName) {
     case ".js":
     case ".cjs":
     case ".mjs":
@@ -351,19 +377,16 @@ function readConfig(
 
 export function* resolveShowConfigPath(
   dirname: string,
+  targetPath: string,
 ): Handler<string | null> {
-  const targetPath = process.env.BABEL_SHOW_CONFIG_FOR;
-  if (targetPath != null) {
-    const absolutePath = path.resolve(dirname, targetPath);
-    const stats = yield* fs.stat(absolutePath);
-    if (!stats.isFile()) {
-      throw new Error(
-        `${absolutePath}: BABEL_SHOW_CONFIG_FOR must refer to a regular file, directories are not supported.`,
-      );
-    }
-    return absolutePath;
+  const absolutePath = path.resolve(dirname, targetPath);
+  const stats = (yield* fs.stat(absolutePath))!;
+  if (!stats.isFile()) {
+    throw new Error(
+      `${absolutePath}: BABEL_SHOW_CONFIG_FOR must refer to a regular file, directories are not supported.`,
+    );
   }
-  return null;
+  return absolutePath;
 }
 
 function throwConfigError(filepath: string): never {

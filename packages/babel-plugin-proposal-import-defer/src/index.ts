@@ -3,7 +3,7 @@ import type { types as t, Scope } from "@babel/core";
 import { defineCommonJSHook } from "@babel/plugin-transform-modules-commonjs";
 
 export default declare(api => {
-  api.assertVersion(REQUIRED_VERSION("^7.23.0"));
+  api.assertVersion(REQUIRED_VERSION("^7.23.0 || ^8.0.0"));
   // We need the explicit type annotation otherwise when using t.assert* ts
   // reports that 'Assertions require every name in the call target to be
   // declared with an explicit type annotation'
@@ -15,9 +15,17 @@ export default declare(api => {
     t.assertImportNamespaceSpecifier(specifier);
 
     const binding = scope.getOwnBinding(specifier.local.name);
-    return !!binding?.referencePaths.every(path =>
-      path.parentPath.isMemberExpression({ object: path.node }),
-    );
+    return !!binding?.referencePaths.every(path => {
+      const { parent } = path;
+      if (!t.isMemberExpression(parent, { object: path.node })) return false;
+      // Accessing `then` does not evaluate a deferred namespace, so it needs
+      // the proxy.
+      const { property, computed } = parent;
+      const name = computed
+        ? t.isStringLiteral(property) && property.value
+        : t.isIdentifier(property) && property.name;
+      return !!name && name !== "then";
+    });
   }
 
   return {
@@ -58,9 +66,17 @@ export default declare(api => {
               }
             `;
           }
+          return null;
         },
         wrapReference(ref, payload) {
           if (payload === "defer/function") return t.callExpression(ref, []);
+          return null;
+        },
+        getDynamicImportWrapper(node) {
+          if (node.phase !== "defer") return null;
+          return ns => template.expression.ast`
+            ${file.addHelper("importDeferProxy")}(() => ${ns})
+          `;
         },
       });
     },
@@ -88,7 +104,7 @@ export default declare(api => {
             (child.isExportNamedDeclaration() && child.node.source !== null) ||
             child.isExportAllDeclaration()
           ) {
-            const specifier = child.node.source.value;
+            const specifier = child.node.source!.value;
             if (!eagerImports.has(specifier)) {
               eagerImports.add(specifier);
             }
@@ -101,7 +117,7 @@ export default declare(api => {
             const specifier = child.node.source.value;
             if (!eagerImports.has(specifier)) continue;
 
-            child.node.phase = null;
+            (child.node as t.ImportDeclaration).phase = null;
             importsToPush.push(child.node);
             child.remove();
           }

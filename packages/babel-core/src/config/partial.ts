@@ -9,19 +9,21 @@ import { getEnv } from "./helpers/environment.ts";
 import { validate } from "./validation/options.ts";
 
 import type {
-  ValidatedOptions,
-  NormalizedOptions,
   RootMode,
   InputOptions,
+  NormalizedOptions,
 } from "./validation/options.ts";
 
 import {
   findConfigUpwards,
   resolveShowConfigPath,
   ROOT_CONFIG_FILENAMES,
-} from "./files/index.ts";
-import type { ConfigFile, IgnoreFile } from "./files/index.ts";
-import { resolveTargets } from "./resolve-targets.ts";
+  type ConfigFile,
+  type IgnoreFile,
+  // eslint-disable-next-line import/no-unresolved, import/extensions
+} from "#config/files";
+// eslint-disable-next-line import/no-unresolved, import/extensions
+import { resolveTargets } from "#config/resolve-targets";
 
 function resolveRootMode(rootDir: string, rootMode: RootMode): string {
   switch (rootMode) {
@@ -59,15 +61,15 @@ export type PrivPartialConfig = {
   showIgnoredFiles?: boolean;
   options: NormalizedOptions;
   context: ConfigContext;
-  babelrc: ConfigFile | void;
-  config: ConfigFile | void;
-  ignore: IgnoreFile | void;
+  babelrc: ConfigFile | undefined;
+  config: ConfigFile | undefined;
+  ignore: IgnoreFile | undefined;
   fileHandling: FileHandling;
   files: Set<string>;
 };
 
 export default function* loadPrivatePartialConfig(
-  inputOpts: InputOptions,
+  inputOpts: InputOptions | null | undefined,
 ): Handler<PrivPartialConfig | null> {
   if (
     inputOpts != null &&
@@ -88,7 +90,7 @@ export default function* loadPrivatePartialConfig(
   } = args;
   const absoluteCwd = path.resolve(cwd);
   const absoluteRootDir = resolveRootMode(
-    path.resolve(absoluteCwd, rootDir),
+    rootDir === "." ? absoluteCwd : path.resolve(absoluteCwd, rootDir),
     rootMode,
   );
 
@@ -97,7 +99,11 @@ export default function* loadPrivatePartialConfig(
       ? path.resolve(cwd, args.filename)
       : undefined;
 
-  const showConfigPath = yield* resolveShowConfigPath(absoluteCwd);
+  const relativeShowConfigPath = process.env.BABEL_SHOW_CONFIG_FOR;
+  const showConfigPath =
+    relativeShowConfigPath != null
+      ? yield* resolveShowConfigPath(absoluteCwd, relativeShowConfigPath)
+      : null;
 
   const context: ConfigContext = {
     filename,
@@ -111,11 +117,11 @@ export default function* loadPrivatePartialConfig(
   const configChain = yield* buildRootChain(args, context);
   if (!configChain) return null;
 
-  const merged: ValidatedOptions = {
+  const merged = {
     assumptions: {},
   };
   configChain.options.forEach(opts => {
-    mergeOptions(merged as any, opts);
+    mergeOptions(merged, opts);
   });
 
   const options: NormalizedOptions = {
@@ -159,7 +165,7 @@ export default function* loadPrivatePartialConfig(
 export function* loadPartialConfig(
   opts?: InputOptions,
 ): Handler<PartialConfig | null> {
-  let showIgnoredFiles = false;
+  let showIgnoredFiles: boolean | undefined = false;
   // We only extract showIgnoredFiles if opts is an object, so that
   // loadPrivatePartialConfig can throw the appropriate error if it's not.
   if (typeof opts === "object" && opts !== null && !Array.isArray(opts)) {
@@ -177,7 +183,6 @@ export function* loadPartialConfig(
   }
 
   (options.plugins || []).forEach(item => {
-    // @ts-expect-error todo(flow->ts): better type annotation for `item.value`
     if (item.value instanceof Plugin) {
       throw new Error(
         "Passing cached plugin instances is not supported in " +
@@ -204,17 +209,17 @@ class PartialConfig {
    * a breaking change to Babel's API.
    */
   options: NormalizedOptions;
-  babelrc: string | void;
-  babelignore: string | void;
-  config: string | void;
+  babelrc: string | undefined;
+  babelignore: string | undefined;
+  config: string | undefined;
   fileHandling: FileHandling;
   files: Set<string>;
 
   constructor(
     options: NormalizedOptions,
-    babelrc: string | void,
-    ignore: string | void,
-    config: string | void,
+    babelrc: string | undefined,
+    ignore: string | undefined,
+    config: string | undefined,
     fileHandling: FileHandling,
     files: Set<string>,
   ) {

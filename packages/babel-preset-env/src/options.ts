@@ -13,14 +13,6 @@ export const TopLevelOptions = {
   browserslistEnv: "browserslistEnv",
 } as const;
 
-if (!process.env.BABEL_8_BREAKING) {
-  Object.assign(TopLevelOptions, {
-    bugfixes: "bugfixes",
-    loose: "loose",
-    spec: "spec",
-  });
-}
-
 export const ModulesOption = {
   false: false,
   auto: "auto",
@@ -29,10 +21,4 @@ export const ModulesOption = {
   cjs: "cjs",
   systemjs: "systemjs",
   umd: "umd",
-} as const;
-
-export const UseBuiltInsOption = {
-  false: false,
-  entry: "entry",
-  usage: "usage",
 } as const;

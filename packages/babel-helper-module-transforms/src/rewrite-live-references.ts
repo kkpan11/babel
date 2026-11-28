@@ -36,8 +36,7 @@ function isInType(path: NodePath) {
         return (
           (
             path.parentPath.parent as
-              | t.ExportDefaultDeclaration
-              | t.ExportNamedDeclaration
+              t.ExportDefaultDeclaration | t.ExportNamedDeclaration
           ).exportKind === "type"
         );
       default:
@@ -104,7 +103,7 @@ export default function rewriteLiveReferences(
     imported, // local / import
     exported, // local name => exported name list
     buildImportReference([source, importName, localName], identNode) {
-      const meta = metadata.source.get(source);
+      const meta = metadata.source.get(source)!;
       meta.referenced = true;
 
       if (localName) {
@@ -190,7 +189,7 @@ const rewriteBindingInitVisitor: Visitor<RewriteBindingInitVisitorState> = {
             // not updated the exported value.
             continue;
           } else {
-            init = path.scope.buildUndefinedNode();
+            init = t.buildUndefinedNode();
           }
         }
         // eslint-disable-next-line @typescript-eslint/no-use-before-define
@@ -200,7 +199,7 @@ const rewriteBindingInitVisitor: Visitor<RewriteBindingInitVisitorState> = {
           init,
           path.scope,
         );
-        requeueInParent(decl.get("init"));
+        requeueInParent(decl.get("init") as NodePath);
       } else {
         for (const localName of Object.keys(
           decl.getOuterBindingIdentifiers(),
@@ -234,7 +233,7 @@ const buildBindingExportAssignmentExpression = (
 ) => {
   const exportsObjectName = metadata.exportName;
   for (
-    let currentScope = scope;
+    let currentScope: Scope | undefined = scope;
     currentScope != null;
     currentScope = currentScope.parent
   ) {
@@ -306,12 +305,18 @@ const rewriteReferencesVisitor: Visitor<RewriteReferencesVisitorState> = {
         path.replaceWith(t.sequenceExpression([t.numericLiteral(0), ref]));
       } else if (path.isJSXIdentifier() && t.isMemberExpression(ref)) {
         const { object, property } = ref;
+        if (ref.computed || !t.isIdentifier(object)) {
+          // e.g. `_m["a b"]` or, with lazy imports, `_m().a`
+          throw path.buildCodeFrameError(
+            `Cannot transform the imported binding "${localName}" since it's used as a JSX element name, ` +
+              `and its reference can't be represented as a JSX member expression. ` +
+              `Please transform JSX using @babel/plugin-transform-react-jsx.`,
+          );
+        }
         path.replaceWith(
           t.jsxMemberExpression(
-            // @ts-expect-error todo(flow->ts): possible bug `object` might not have a name
             t.jsxIdentifier(object.name),
-            // @ts-expect-error todo(flow->ts): possible bug `property` might not have a name
-            t.jsxIdentifier(property.name),
+            t.jsxIdentifier((property as t.Identifier).name),
           ),
         );
       } else {
@@ -362,7 +367,6 @@ const rewriteReferencesVisitor: Visitor<RewriteReferencesVisitorState> = {
         if (importData) {
           path.replaceWith(
             t.assignmentExpression(
-              // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
               (update.operator[0] + "=") as t.AssignmentExpression["operator"],
               buildImportReference(importData, arg.node),
               buildImportThrow(localName),

@@ -1,0 +1,12 @@
+{
+  "plugins": [
+    "transform-function-name",
+    "transform-classes",
+    "transform-spread",
+    "transform-block-scoping"
+  ],
+  "assumptions": {
+    "noConstructorPrimitiveReturn": true,
+    "iterableIsArray": true
+  }
+}

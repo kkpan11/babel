@@ -9,8 +9,7 @@ import {
   createConfigItemSync,
 } from "../lib/index.js";
 import path from "node:path";
-import { itNoWin32, itBabel8, commonJS } from "$repo-utils";
-import { supportsESM } from "./helpers/esm.js";
+import { itNoWin32, commonJS } from "$repo-utils";
 
 const { require, __dirname } = commonJS(import.meta.url);
 
@@ -50,7 +49,7 @@ describe("@babel/core config loading", () => {
   }
 
   describe("createConfigItem", () => {
-    itBabel8("throws on undefined callback", () => {
+    it("throws on undefined callback", () => {
       function myPlugin() {
         return {};
       }
@@ -59,6 +58,27 @@ describe("@babel/core config loading", () => {
       ).toThrowErrorMatchingInlineSnapshot(
         `"Starting from Babel 8.0.0, the 'createConfigItem' function expects a callback. If you need to call it synchronously, please use 'createConfigItemSync'."`,
       );
+      expect(() =>
+        createConfigItem(myPlugin, {}),
+      ).toThrowErrorMatchingInlineSnapshot(
+        `"Starting from Babel 8.0.0, the 'createConfigItem' function expects a callback. If you need to call it synchronously, please use 'createConfigItemSync'."`,
+      );
+    });
+    it("accepts a callback as the second argument", () => {
+      function myPlugin() {
+        return {};
+      }
+      return new Promise((resolve, reject) => {
+        createConfigItem(myPlugin, (err, val) => {
+          try {
+            expect(err).toBeUndefined();
+            expect(val.value).toBe(myPlugin);
+            resolve();
+          } catch (e) {
+            reject(e);
+          }
+        });
+      });
     });
   });
 
@@ -96,7 +116,7 @@ describe("@babel/core config loading", () => {
   });
 
   describe("loadPartialConfig", () => {
-    itBabel8("throws on undefined callback", () => {
+    it("throws on undefined callback", () => {
       expect(() =>
         loadPartialConfig({
           ...makeOpts(true),
@@ -166,40 +186,110 @@ describe("@babel/core config loading", () => {
       expect(options.root).toBe(path.join(cwd, ".."));
       expect(options.rootMode).toBe("root");
     });
+
+    it("should load a JS config file from a relative path without extension", () => {
+      const cwd = path.join(
+        __dirname,
+        "fixtures",
+        "config-loading",
+        "extensionless",
+      );
+
+      const { options, config } = loadPartialConfigSync({
+        cwd,
+        filename: path.join(cwd, "file.js"),
+        configFile: "./my-config",
+      });
+
+      expect(config).toBe(path.join(cwd, "my-config.js"));
+      expect(options.comments).toBe(false);
+    });
+
+    it("should load a JS config file from an absolute path without extension", () => {
+      const cwd = path.join(
+        __dirname,
+        "fixtures",
+        "config-loading",
+        "extensionless",
+      );
+
+      const { options, config } = loadPartialConfigSync({
+        cwd,
+        filename: path.join(cwd, "file.js"),
+        configFile: path.join(cwd, "my-config"),
+      });
+
+      expect(config).toBe(path.join(cwd, "my-config.js"));
+      expect(options.comments).toBe(false);
+    });
+
+    // The extension must be taken from the resolved path, since
+    // path.extname("./babel.config") is ".config".
+    it("should load a JS config file from a relative path with a dot but without extension", () => {
+      const cwd = path.join(
+        __dirname,
+        "fixtures",
+        "config-loading",
+        "extensionless",
+      );
+
+      const { options, config } = loadPartialConfigSync({
+        cwd,
+        filename: path.join(cwd, "file.js"),
+        configFile: "./babel.config",
+      });
+
+      expect(config).toBe(path.join(cwd, "babel.config.js"));
+      expect(options.comments).toBe(false);
+    });
+
+    it("should load a JS config file from an absolute path with a dot but without extension", () => {
+      const cwd = path.join(
+        __dirname,
+        "fixtures",
+        "config-loading",
+        "extensionless",
+      );
+
+      const { options, config } = loadPartialConfigSync({
+        cwd,
+        filename: path.join(cwd, "file.js"),
+        configFile: path.join(cwd, "babel.config"),
+      });
+
+      expect(config).toBe(path.join(cwd, "babel.config.js"));
+      expect(options.comments).toBe(false);
+    });
   });
 
   describe("loadPartialConfigAsync", () => {
     // https://github.com/babel/babel/issues/15916
-    (supportsESM ? it : it.skip)(
-      "two calls in parallel loading the same ESM config",
-      async () => {
-        const cwd = path.join(
-          __dirname,
-          "fixtures",
-          "config",
-          "config-files",
-          "babel-config-mjs-object",
-        );
+    it("two calls in parallel loading the same ESM config", async () => {
+      const cwd = path.join(
+        __dirname,
+        "fixtures",
+        "config",
+        "config-files",
+        "babel-config-mjs-object",
+      );
 
-        const [config1, config2] = await Promise.all([
-          loadPartialConfigAsync({
-            cwd,
-            filename: path.join(cwd, "./a.js"),
-          }),
-          loadPartialConfigAsync({
-            cwd,
-            filename: path.join(cwd, "./b.js"),
-          }),
-        ]);
+      const [config1, config2] = await Promise.all([
+        loadPartialConfigAsync({
+          cwd,
+          filename: path.join(cwd, "./a.js"),
+        }),
+        loadPartialConfigAsync({
+          cwd,
+          filename: path.join(cwd, "./b.js"),
+        }),
+      ]);
 
-        // eslint-disable-next-line jest/no-standalone-expect
-        expect(config1.options.plugins).toEqual(config2.options.plugins);
-      },
-    );
+      expect(config1.options.plugins).toEqual(config2.options.plugins);
+    });
   });
 
   describe("loadOptions", () => {
-    itBabel8("throws on undefined callback", () => {
+    it("throws on undefined callback", () => {
       const opts = makeOpts();
 
       expect(() => loadOptions(opts)).toThrowErrorMatchingInlineSnapshot(

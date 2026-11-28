@@ -6,25 +6,23 @@ import pluginTransformTypeScript from "@babel/plugin-transform-typescript";
 import { commonJS } from "$repo-utils";
 import { cloneNode } from "@babel/types";
 
-import _generate from "../lib/index.js";
-const generate = _generate.default || _generate;
+import generate from "../lib/index.js";
 
 const { __dirname } = commonJS(import.meta.url);
 
-const suites = (fixtures.default || fixtures)(path.join(__dirname, "fixtures"));
+const suites = fixtures(path.join(__dirname, "fixtures"));
 
 const FAILURES = [
   // Todo: support trailing comments spanned across trailing comma
   "import-phases/source-expression-comments/input.js",
   "import-phases/source-expression-options-comments/input.js",
+  "import-sync/comments/input.js",
+  "import-sync/options-comments/input.js",
 
   // These tests are either explicitly about re-formatting the decorators position,
   // or about an old decorators version
   "comments/decorators-after-export-to-before/input.js",
   "comments/decorators-before-export-to-after/input.js",
-  "decorators/decorator-call-expression/input.js",
-  "decorators/decorator-parenthesized-expression/input.js",
-  "decorators/decorator-parenthesized-expression-createParenthesizedExpression/input.js",
   "decoratorsBeforeExport/false-to-true/input.js",
   "decoratorsBeforeExport/true-to-false/input.js",
 
@@ -35,15 +33,17 @@ const FAILURES = [
   "flow/declare-module/input.js",
   "flow/declare-exports/input.js",
   "flow/declare-statements/input.js",
+  "flow/implements-comments/input.js",
+  "flow/implements-with-retainlines/input.js",
   "flow/indexed-access-types/input.js",
   "flow/interfaces-module-and-script/input.js",
   "flow/iterator-inside-declare/input.js",
   "flow/iterator-inside-interface/input.js",
-  "flow/iterator-inside-types/input.js",
   "flow/object-literal-types/input.js",
   "flow/opaque-type-alias/input.js",
   "flow/parentheses/input.js",
   "flow/predicates/input.js",
+  "flow/predicates-comments/input.js",
   "flow/this-param/input.js",
   "flow/tuples/input.js",
   "flow/type-alias/input.js",
@@ -152,6 +152,7 @@ describe("experimental_preserveFormat", () => {
       const out = babel.transformSync(input, {
         configFile: false,
         plugins: [pluginTransformTypeScript],
+        sourceMaps: true,
         parserOpts: {
           createParenthesizedExpressions: true,
           tokens: true,
@@ -163,6 +164,10 @@ describe("experimental_preserveFormat", () => {
       });
 
       expect(out.code.trimEnd()).toBe(expected.trimEnd());
+
+      expect(out.map.mappings).toMatchInlineSnapshot(
+        `";QACQ,MAAM,EAAE,EAAE,CAAC,SAAS;kCACM,UAAU"`,
+      );
     });
 
     it("identifier renaming", () => {
@@ -304,6 +309,70 @@ describe("experimental_preserveFormat", () => {
               },
             },
           }),
+        ],
+        parserOpts: {
+          createParenthesizedExpressions: true,
+          tokens: true,
+        },
+        generatorOpts: {
+          retainLines: true,
+          experimental_preserveFormat: true,
+        },
+      });
+
+      expect(out.code.trimEnd()).toBe(expected.trimEnd());
+    });
+
+    it("adds `()` to `new` when a postfix part is added after it", () => {
+      const input = `
+        a = new F;
+        b = new F;
+        c = new F;
+        d = (new F);
+        e = new F;
+      `;
+      const expected = `
+        a = new F().x;
+        b = new F()?.x;
+        c = new F()\`x\`;
+        d = (new F).x;
+        e =g(new F);
+      `;
+
+      const out = babel.transformSync(input, {
+        configFile: false,
+        plugins: [
+          ({ types: t }) => {
+            const wrappers = {
+              a: node => t.memberExpression(node, t.identifier("x")),
+              b: node =>
+                t.optionalMemberExpression(
+                  node,
+                  t.identifier("x"),
+                  false,
+                  true,
+                ),
+              c: node =>
+                t.taggedTemplateExpression(
+                  node,
+                  t.templateLiteral(
+                    [t.templateElement({ raw: "x" }, true)],
+                    [],
+                  ),
+                ),
+              d: node => t.memberExpression(node, t.identifier("x")),
+              e: node => t.callExpression(t.identifier("g"), [node]),
+            };
+            return {
+              visitor: {
+                AssignmentExpression(path) {
+                  const { left, right } = path.node;
+                  path.node.right = wrappers[left.name](right);
+                  path.skip();
+                },
+              },
+            };
+          },
         ],
         parserOpts: {
           createParenthesizedExpressions: true,

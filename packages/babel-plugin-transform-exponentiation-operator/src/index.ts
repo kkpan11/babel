@@ -1,8 +1,9 @@
 import { declare } from "@babel/helper-plugin-utils";
 import type { types as t, Scope } from "@babel/core";
+import { skipTransparentExprWrapperNodes } from "@babel/helper-skip-transparent-expression-wrappers";
 
 export default declare(api => {
-  api.assertVersion(REQUIRED_VERSION(7));
+  api.assertVersion(REQUIRED_VERSION("^7.0.0-0 || ^8.0.0"));
 
   const { types: t, template } = api;
 
@@ -34,7 +35,6 @@ export default declare(api => {
         t.cloneNode(id),
         // This is not t.Super, because otherwise the .isStatic check above
         // would have returned true.
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
         node as t.Expression,
       ),
       ref: t.cloneNode(id),
@@ -49,12 +49,19 @@ export default declare(api => {
         const { node, scope } = path;
         if (node.operator !== "**=") return;
 
-        if (t.isMemberExpression(node.left)) {
-          let member1: t.Expression;
-          let member2: t.Expression;
+        // Look through wrappers such as `!` and `as`, so that the object and key
+        // of a wrapped member expression are memoised and only evaluated once.
+        const left = skipTransparentExprWrapperNodes(node.left) as t.Expression;
 
-          const object = maybeMemoize(node.left.object, scope);
-          if (!object) {
+        if (t.isMemberExpression(left)) {
+          const { property, computed } = left;
+
+          const object = maybeMemoize(left.object, scope);
+          const prop = computed
+            ? maybeMemoize(property, scope)
+            : { assign: property, ref: t.cloneNode(property) };
+
+          if (!object || !prop) {
             // We need to inject a temp var, but we are in function parameters
             // and thus cannot. Wrap the expression in an IIFE. It will be
             // eventually requeued and transformed.
@@ -62,34 +69,22 @@ export default declare(api => {
             return;
           }
 
-          const { property, computed } = node.left;
-
-          if (computed) {
-            const prop = maybeMemoize(property as t.Expression, scope);
-            member1 = t.memberExpression(object.assign, prop.assign, true);
-            member2 = t.memberExpression(object.ref, prop.ref, true);
-          } else {
-            member1 = t.memberExpression(object.assign, property, false);
-            member2 = t.memberExpression(
-              object.ref,
-              t.cloneNode(property),
-              false,
-            );
-          }
-
           path.replaceWith(
-            t.assignmentExpression("=", member1, build(member2, node.right)),
+            t.assignmentExpression(
+              "=",
+              t.memberExpression(object.assign, prop.assign, computed),
+              build(
+                t.memberExpression(object.ref, prop.ref, computed),
+                node.right,
+              ),
+            ),
           );
         } else {
           path.replaceWith(
             t.assignmentExpression(
               "=",
-              node.left,
-              build(
-                // todo: it could be a t.AsExpression
-                t.cloneNode(node.left) as t.Identifier,
-                node.right,
-              ),
+              left as t.Identifier,
+              build(t.cloneNode(left) as t.Identifier, node.right),
             ),
           );
         }
@@ -98,13 +93,7 @@ export default declare(api => {
       BinaryExpression(path) {
         const { node } = path;
         if (node.operator === "**") {
-          path.replaceWith(
-            build(
-              // left can be PrivateName only if operator is `"in"`
-              node.left as t.Expression,
-              node.right,
-            ),
-          );
+          path.replaceWith(build(node.left, node.right));
         }
       },
     },
